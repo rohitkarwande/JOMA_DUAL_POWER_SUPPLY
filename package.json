@@ -1,0 +1,41 @@
+{
+  "name": "joma-dual-ps-scada",
+  "version": "1.0.0",
+  "description": "JOMA Dual Channel Power Supply SCADA Application",
+  "main": "dist-electron/electron/main.js",
+  "scripts": {
+    "dev": "vite",
+    "build:electron": "tsc -p tsconfig.electron.json",
+    "build:renderer": "vite build",
+    "build": "tsc -p tsconfig.electron.json && vite build",
+    "start": "npm run electron:dev",
+    "electron:dev": "tsc -p tsconfig.electron.json && concurrently \"vite\" \"wait-on http://localhost:5173 && electron .\""
+  },
+  "dependencies": {
+    "clsx": "^2.1.1",
+    "lucide-react": "^0.475.0",
+    "modbus-serial": "^8.0.25",
+    "react": "^19.0.0",
+    "react-dom": "^19.0.0",
+    "recharts": "^2.15.1",
+    "rxjs": "^7.8.2",
+    "serialport": "^13.0.0",
+    "tailwind-merge": "^3.0.1",
+    "typescript": "^5.7.3"
+  },
+  "devDependencies": {
+    "@types/node": "^22.13.4",
+    "@types/react": "^19.0.8",
+    "@types/react-dom": "^19.0.3",
+    "@vitejs/plugin-react": "^4.3.4",
+    "autoprefixer": "^10.4.20",
+    "caniuse-lite": "^1.0.30001815",
+    "concurrently": "^9.2.4",
+    "electron": "^34.2.0",
+    "electron-builder": "^25.1.8",
+    "postcss": "^8.5.2",
+    "tailwindcss": "^3.4.17",
+    "vite": "^6.1.1",
+    "wait-on": "^8.0.2"
+  }
+}

@@ -1,0 +1,65 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background-color: #f8fafc;
+    color: #0f172a;
+  }
+}
+
+/* Digital LED Display Readout Styling */
+.digital-display {
+  font-family: 'Consolas', 'Courier New', monospace;
+  letter-spacing: 0.05em;
+  background-color: #0f172a;
+  color: #38bdf8; /* Vibrant Cyan-Blue Digits */
+  text-shadow: 0 0 10px rgba(56, 189, 248, 0.4);
+}
+
+.digital-display-ch2 {
+  font-family: 'Consolas', 'Courier New', monospace;
+  letter-spacing: 0.05em;
+  background-color: #0f172a;
+  color: #60a5fa; /* Royal Blue Digits */
+  text-shadow: 0 0 10px rgba(96, 165, 250, 0.4);
+}
+
+.digital-display-total {
+  font-family: 'Consolas', 'Courier New', monospace;
+  letter-spacing: 0.05em;
+  background-color: #031527;
+  color: #00f0ff; /* Bright Cyan Digital Readout */
+  text-shadow: 0 0 12px rgba(0, 240, 255, 0.6);
+}
+
+/* Custom Scrollbar for Industrial UI */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #94a3b8;
+  border-radius: 3px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #0284c7;
+}
+
+/* Remove up/down spinner arrows from number input fields */
+input[type="number"]::-webkit-inner-spin-button,
+input[type="number"]::-webkit-outer-spin-button {
+  -webkit-appearance: none;
+  margin: 0;
+}
+input[type="number"] {
+  -moz-appearance: textfield;
+}
