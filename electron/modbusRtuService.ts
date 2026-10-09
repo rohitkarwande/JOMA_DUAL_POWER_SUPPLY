@@ -1,6 +1,6 @@
 import ModbusRTU from 'modbus-serial';
 import { BrowserWindow } from 'electron';
-import { SerialSettings, OperatingMode, DualPSTelemetry, SequenceStep } from '../src/types/powerSupply';
+import { SerialSettings, OperatingMode, AppMode, DualPSTelemetry, SinglePSTelemetry, SequenceStep } from '../src/types/powerSupply';
 
 export interface SequenceProgress {
   status: 'IDLE' | 'INITIALIZING' | 'RUNNING' | 'PAUSED' | 'STOPPED' | 'ERROR' | 'COMPLETED';
@@ -72,6 +72,7 @@ export class ModbusRtuService {
     autoReconnect: true,
   };
 
+  private appMode: AppMode = 'DUAL_PS';
   private activeMode: OperatingMode = 'ISOLATED';
   private isOutputEnabled = false;
   private pollingTimer: NodeJS.Timeout | null = null;
@@ -93,7 +94,7 @@ export class ModbusRtuService {
   private sequenceStepStartTime = 0;
   private sequenceStepDeadlineTime = 0;
 
-  // Cached Telemetry State
+  // Cached Dual PS Telemetry State
   private lastTelemetry: DualPSTelemetry = {
     timestamp: Date.now(),
     mode: 'ISOLATED',
@@ -112,6 +113,23 @@ export class ModbusRtuService {
       commFault: false,
       emergencyStop: false,
     },
+  };
+
+  // Cached Single PS Telemetry State
+  private lastSingleTelemetry: SinglePSTelemetry = {
+    timestamp: Date.now(),
+    outputState: 'OFF',
+    vMon: 0,
+    iMon: 0,
+    vSet: 0,
+    iSet: 0,
+    powerActual: 0,
+    alarms: {
+      commFault: false,
+      emergencyStop: false,
+    },
+    maxVoltage: 60.0,
+    maxCurrent: 10.0,
   };
 
   constructor(windowGetter: () => BrowserWindow | null) {
@@ -181,6 +199,29 @@ export class ModbusRtuService {
     return true;
   }
 
+  public async setAppMode(mode: AppMode): Promise<{ success: boolean; error?: string }> {
+    if (this.isOutputEnabled) {
+      return {
+        success: false,
+        error: 'Safety Interlock: Cannot switch application mode while hardware output is ON. Please turn output OFF first.',
+      };
+    }
+    this.stopSequence();
+    this.sessionId++;
+    this.busLock.clearQueue();
+    this.isPollInFlight = false;
+    this.appMode = mode;
+    console.log(`[App Mode Switch] Active Application Mode changed to: ${mode}`);
+    if (this.isConnected) {
+      this.pollTelemetry();
+    }
+    return { success: true };
+  }
+
+  public getAppMode(): AppMode {
+    return this.appMode;
+  }
+
   // NOTE: Mode is read-only from HMI register 4X 29 (POP_WINDOW) per specification
   public async setMode(mode: OperatingMode): Promise<boolean> {
     this.activeMode = mode;
@@ -193,6 +234,7 @@ export class ModbusRtuService {
     this.lastTelemetry.outputState = enabled ? 'ON' : 'OFF';
     this.lastTelemetry.ch1.outputEnabled = enabled;
     this.lastTelemetry.ch2.outputEnabled = enabled;
+    this.lastSingleTelemetry.outputState = enabled ? 'ON' : 'OFF';
 
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
@@ -283,6 +325,45 @@ export class ModbusRtuService {
     });
   }
 
+  public async setSingleSetpoints(params: { vSet?: number; iSet?: number }): Promise<boolean> {
+    const vMax = this.lastSingleTelemetry.maxVoltage || 60.0;
+    const iMax = this.lastSingleTelemetry.maxCurrent || 10.0;
+
+    if (
+      (params.vSet !== undefined && params.vSet > vMax) ||
+      (params.iSet !== undefined && params.iSet > iMax)
+    ) {
+      console.error(`[Safety Interlock] Single PS Setpoint write rejected: Exceeds V_max (${vMax}V) or I_max (${iMax}A)`);
+      return false;
+    }
+
+    if (params.vSet !== undefined) this.lastSingleTelemetry.vSet = params.vSet;
+    if (params.iSet !== undefined) this.lastSingleTelemetry.iSet = params.iSet;
+
+    if (!this.isConnected) return true;
+    const currentSession = this.sessionId;
+
+    return this.busLock.runExclusive(async () => {
+      if (!this.isConnected || this.sessionId !== currentSession) {
+        return false;
+      }
+      try {
+        // Base-1 Reg 4X 1 -> PDU Wire Address 0 (Float32 LE)
+        if (params.vSet !== undefined) {
+          await this.writeFloat32(0, params.vSet);
+        }
+        // Base-1 Reg 4X 3 -> PDU Wire Address 2 (Float32 LE)
+        if (params.iSet !== undefined) {
+          await this.writeFloat32(2, params.iSet);
+        }
+        return true;
+      } catch (err) {
+        console.error('Failed to write Single PS setpoints over Modbus:', err);
+        return false;
+      }
+    });
+  }
+
   private startPolling() {
     this.stopPolling();
     this.pollingTimer = setInterval(() => {
@@ -302,6 +383,11 @@ export class ModbusRtuService {
 
     this.isPollInFlight = true;
     const currentSession = this.sessionId;
+
+    if (this.appMode === 'SINGLE_PS') {
+      await this.pollSingleTelemetry(currentSession);
+      return;
+    }
 
     await this.busLock.runExclusive(async () => {
       try {
@@ -432,6 +518,83 @@ export class ModbusRtuService {
     });
   }
 
+  private async pollSingleTelemetry(currentSession: number) {
+    await this.busLock.runExclusive(async () => {
+      try {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return;
+        }
+
+        try {
+          const coilRes = await this.client.readCoils(0, 1);
+          if (coilRes && coilRes.data && coilRes.data.length > 0) {
+            this.isOutputEnabled = Boolean(coilRes.data[0]);
+          }
+        } catch (_) {}
+
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return;
+        }
+
+        // Single Power Supply CSV Mapping:
+        // Reg 4X 1 (PDU 0, 2 words FloatLE): V SET
+        // Reg 4X 3 (PDU 2, 2 words FloatLE): I SET
+        // Reg 4X 5 (PDU 4, 2 words FloatLE): V MON
+        // Reg 4X 7 (PDU 6, 2 words FloatLE): I MON
+        const res = await this.client.readHoldingRegisters(0, 8);
+
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return;
+        }
+
+        const buf = res.buffer;
+        const vSet = buf.readFloatLE(0);
+        const iSet = buf.readFloatLE(4);
+        const vMon = buf.readFloatLE(8);
+        const iMon = buf.readFloatLE(12);
+
+        const vMonVal = !isNaN(vMon) ? Math.max(0, Number(vMon.toFixed(3))) : 0;
+        const iMonVal = !isNaN(iMon) ? Math.max(0, Number(iMon.toFixed(4))) : 0;
+        const vSetVal = !isNaN(vSet) && vSet >= 0 ? Number(vSet.toFixed(3)) : this.lastSingleTelemetry.vSet;
+        const iSetVal = !isNaN(iSet) && iSet >= 0 ? Number(iSet.toFixed(4)) : this.lastSingleTelemetry.iSet;
+        const powerVal = Number((vMonVal * iMonVal).toFixed(2));
+
+        this.lastSingleTelemetry = {
+          timestamp: Date.now(),
+          outputState: this.isOutputEnabled ? 'ON' : 'OFF',
+          vMon: vMonVal,
+          iMon: iMonVal,
+          vSet: vSetVal,
+          iSet: iSetVal,
+          powerActual: powerVal,
+          alarms: {
+            commFault: false,
+            emergencyStop: false,
+          },
+          isStale: false,
+          maxVoltage: 60.0,
+          maxCurrent: 10.0,
+        };
+
+        this.consecutiveErrors = 0;
+        this.emitSingleTelemetry(this.lastSingleTelemetry);
+      } catch (err) {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return;
+        }
+        this.consecutiveErrors++;
+        if (this.consecutiveErrors >= 3) {
+          this.lastSingleTelemetry.alarms.commFault = true;
+          this.lastSingleTelemetry.isStale = true;
+          this.emitSingleTelemetry(this.lastSingleTelemetry);
+          this.notifyStatus(false, 'Communication timeout / hardware error (Single PS)');
+        }
+      } finally {
+        this.isPollInFlight = false;
+      }
+    });
+  }
+
   private async writeFloat32(pduAddress: number, value: number) {
     const buf = Buffer.alloc(4);
     buf.writeFloatLE(value, 0);
@@ -445,6 +608,13 @@ export class ModbusRtuService {
     const win = this.windowGetter();
     if (win && !win.isDestroyed()) {
       win.webContents.send('modbus:telemetry', telemetry);
+    }
+  }
+
+  private emitSingleTelemetry(telemetry: SinglePSTelemetry) {
+    const win = this.windowGetter();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('modbus:singleTelemetry', telemetry);
     }
   }
 
@@ -600,6 +770,12 @@ export class ModbusRtuService {
     if (!this.isConnected) {
       return { success: false, error: 'Cannot start sequence: Power Supply is not connected' };
     }
+    if (this.activeMode !== 'ISOLATED') {
+      return {
+        success: false,
+        error: `Cannot start sequence: Hardware Register 4X 29 is currently in ${this.activeMode} mode. Automated Test Sequence requires ISOLATED mode.`,
+      };
+    }
     if (this.isOutputEnabled) {
       return { success: false, error: 'Cannot start sequence: Hardware output is currently ON. Turn output OFF first.' };
     }
@@ -618,6 +794,7 @@ export class ModbusRtuService {
     console.log(`================================================================================`);
     console.log(`[Sequence Startup] Starting Sequence Execution Flow at ${new Date().toISOString()}`);
     console.log(`[Sequence Startup] Total Steps: ${steps.length}, Total Cycles: ${this.sequenceTotalCycles}`);
+    console.log(`[Sequence Startup] Verified Hardware Register 4X 29 Mode: ISOLATED (Read-Only)`);
 
     this.emitSequenceProgress();
 
@@ -625,21 +802,18 @@ export class ModbusRtuService {
     const capturedSessionId = ++this.sessionId;
 
     (async () => {
-      const requestedMode = steps[0].mode || this.activeMode;
-
-      // 1. Write selected sequence mode to hardware & verify
-      const modeResult = await this.writeHardwareMode(requestedMode);
-      if (!modeResult.success || this.sessionId !== capturedSessionId) {
+      // Re-verify Hardware Register 4X 29 is ISOLATED
+      if (this.activeMode !== 'ISOLATED') {
         if (this.sessionId === capturedSessionId) {
           this.sequenceStatus = 'ERROR';
-          const err = modeResult.error || 'Mode verification failed';
+          const err = `Cannot start sequence: Hardware Register 4X 29 is in ${this.activeMode} mode. Test Sequence requires ISOLATED mode.`;
           console.error(`[Sequence Startup] ABORTED: ${err}`);
           this.emitSequenceProgress(err);
         }
         return;
       }
 
-      // 2. Write OUTPUT ON to hardware & verify
+      // Write OUTPUT ON to hardware & verify
       const outputResult = await this.writeOutputStateConfirmed(true);
       if (!outputResult.success || this.sessionId !== capturedSessionId) {
         if (this.sessionId === capturedSessionId) {
@@ -651,7 +825,7 @@ export class ModbusRtuService {
         return;
       }
 
-      // 3. Mode & Output verified -> Mark status RUNNING and execute Step 1 setpoints
+      // Output verified -> Mark status RUNNING and execute Step 1 setpoints
       this.sequenceStatus = 'RUNNING';
       this.emitSequenceProgress();
       this.executeSequenceStep(capturedSessionId);

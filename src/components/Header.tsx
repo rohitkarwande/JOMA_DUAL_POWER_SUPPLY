@@ -1,15 +1,17 @@
 import React from 'react';
 import { JomaLogo } from './JomaLogo';
-import { OperatingMode, OutputState } from '../types/powerSupply';
-import { Activity, Plug, Power, Settings, Lock } from 'lucide-react';
+import { OperatingMode, AppMode, OutputState } from '../types/powerSupply';
+import { Activity, Plug, Power, Settings, Lock, Layers, Zap } from 'lucide-react';
 
 interface HeaderProps {
   connected: boolean;
   activePort?: string;
   outputState: OutputState;
+  appMode: AppMode;
   activeMode: OperatingMode;
   onToggleOutput: () => void;
   onOpenSettings: () => void;
+  onSelectAppMode: (mode: AppMode) => void;
   onSelectMode: (mode: OperatingMode) => void;
 }
 
@@ -17,59 +19,91 @@ export const Header: React.FC<HeaderProps> = ({
   connected,
   activePort = 'COM1',
   outputState,
+  appMode,
   activeMode,
   onToggleOutput,
   onOpenSettings,
+  onSelectAppMode,
   onSelectMode,
 }) => {
   const isOutputOn = outputState === 'ON';
 
   return (
     <header className="h-16 bg-white border-b border-slate-200 px-6 flex items-center justify-between shadow-sm select-none">
-      {/* Left Branding */}
+      {/* Left Branding & Top App Mode Toggle */}
       <div className="flex items-center gap-5">
         <JomaLogo height={34} />
         <div className="h-6 w-px bg-slate-200" />
         <div>
-          <h1 className="text-base font-bold text-slate-800 tracking-tight flex items-center gap-2">
-            Dual Channel Power Supply
+          <h1 className="text-base font-extrabold text-slate-800 tracking-tight flex items-center gap-2">
+            JOMA Power Supply Control HMI
           </h1>
-          <p className="text-[11px] font-semibold text-slate-400">RS485 Modbus RTU Control System</p>
+          <p className="text-[11px] font-semibold text-slate-400">RS485 Modbus RTU System</p>
+        </div>
+
+        {/* Top Level App Mode Selector (Dual PS vs Single PS) */}
+        <div className="flex items-center gap-1 bg-slate-100 p-1 rounded-xl border border-slate-200 ml-4">
+          <button
+            onClick={() => !isOutputOn && onSelectAppMode('DUAL_PS')}
+            disabled={isOutputOn}
+            title={isOutputOn ? 'Safety Interlock: Turn Output OFF to switch modes' : 'Switch to Dual Channel Power Supply Mode'}
+            className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition-all ${
+              appMode === 'DUAL_PS'
+                ? 'bg-blue-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+            } ${isOutputOn ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+          >
+            <Layers className="w-3.5 h-3.5" /> DUAL PS MODE
+          </button>
+          <button
+            onClick={() => !isOutputOn && onSelectAppMode('SINGLE_PS')}
+            disabled={isOutputOn}
+            title={isOutputOn ? 'Safety Interlock: Turn Output OFF to switch modes' : 'Switch to Single Power Supply Mode'}
+            className={`px-3 py-1.5 rounded-lg text-xs font-black flex items-center gap-1.5 transition-all ${
+              appMode === 'SINGLE_PS'
+                ? 'bg-cyan-600 text-white shadow-xs'
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-200'
+            } ${isOutputOn ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+          >
+            <Zap className="w-3.5 h-3.5 text-amber-300" /> SINGLE PS MODE
+          </button>
         </div>
       </div>
 
       {/* Right Controls & Status */}
       <div className="flex items-center gap-4">
-        {/* Operating Mode Display / Selector */}
-        <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
-          <span className="text-xs font-black text-slate-600 px-2 flex items-center gap-1.5">
-            <Activity className="w-4 h-4 text-sky-600" /> MODE:
-          </span>
-          {connected ? (
-            <div
-              className="flex items-center gap-2 px-3.5 py-1.5 bg-sky-700 text-white rounded-lg text-xs font-black shadow-xs tracking-wide"
-              title="Operating Mode is controlled directly by Hardware HMI (Reg 4X 29 POP_WINDOW)"
-            >
-              <Lock className="w-3.5 h-3.5 text-sky-200" />
-              <span>{activeMode} MODE (HARDWARE READ-ONLY)</span>
-            </div>
-          ) : (
-            (['ISOLATED', 'PARALLEL', 'SERIES'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => onSelectMode(m)}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all ${
-                  activeMode === m
-                    ? 'bg-sky-600 text-white shadow-sm ring-1 ring-sky-700'
-                    : 'text-slate-700 hover:bg-slate-200 hover:text-slate-900'
-                }`}
-                title={`Offline Preview Mode: ${m}`}
+        {/* Hardware Operating Mode Display (Only relevant in Dual PS Mode) */}
+        {appMode === 'DUAL_PS' && (
+          <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
+            <span className="text-xs font-black text-slate-600 px-2 flex items-center gap-1.5">
+              <Activity className="w-4 h-4 text-sky-600" /> MODE:
+            </span>
+            {connected ? (
+              <div
+                className="flex items-center gap-2 px-3.5 py-1.5 bg-sky-700 text-white rounded-lg text-xs font-black shadow-xs tracking-wide"
+                title="Operating Mode is controlled directly by Hardware HMI (Reg 4X 29 POP_WINDOW)"
               >
-                {m}
-              </button>
-            ))
-          )}
-        </div>
+                <Lock className="w-3.5 h-3.5 text-sky-200" />
+                <span>{activeMode} MODE (HARDWARE READ-ONLY)</span>
+              </div>
+            ) : (
+              (['ISOLATED', 'PARALLEL', 'SERIES'] as const).map((m) => (
+                <button
+                  key={m}
+                  onClick={() => onSelectMode(m)}
+                  className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all ${
+                    activeMode === m
+                      ? 'bg-sky-600 text-white shadow-sm ring-1 ring-sky-700'
+                      : 'text-slate-700 hover:bg-slate-200 hover:text-slate-900'
+                  }`}
+                  title={`Offline Preview Mode: ${m}`}
+                >
+                  {m}
+                </button>
+              ))
+            )}
+          </div>
+        )}
 
         {/* RS485 Connection Badge */}
         <div
@@ -108,4 +142,5 @@ export const Header: React.FC<HeaderProps> = ({
     </header>
   );
 };
+
 

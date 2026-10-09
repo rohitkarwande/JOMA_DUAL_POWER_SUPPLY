@@ -1,6 +1,25 @@
+export type AppMode = 'DUAL_PS' | 'SINGLE_PS';
+
 export type OperatingMode = 'ISOLATED' | 'SERIES' | 'PARALLEL';
 
 export type OutputState = 'OFF' | 'ON' | 'FAULT';
+
+export interface SinglePSTelemetry {
+  timestamp: number;
+  outputState: OutputState;
+  vMon: number;         // V MON measured actual voltage (Reg 4X 5)
+  iMon: number;         // I MON measured actual current (Reg 4X 7)
+  vSet: number;         // V SET voltage setpoint (Reg 4X 1)
+  iSet: number;         // I SET current setpoint (Reg 4X 3)
+  powerActual: number;  // calculated Vmon * Imon (W)
+  alarms: {
+    commFault: boolean;
+    emergencyStop: boolean;
+  };
+  isStale?: boolean;
+  maxVoltage?: number;  // V_max limit
+  maxCurrent?: number;  // I_max limit
+}
 
 export interface ChannelData {
   voltageActual: number;   // Vmon

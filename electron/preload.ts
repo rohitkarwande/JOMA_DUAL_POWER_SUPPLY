@@ -7,7 +7,8 @@ contextBridge.exposeInMainWorld('electronAPI', {
   connectSerial: (settings: SerialSettings) => ipcRenderer.invoke('modbus:connect', settings),
   disconnectSerial: () => ipcRenderer.invoke('modbus:disconnect'),
 
-  // Power Supply Commands
+  // Power Supply Commands & Application Mode
+  setAppMode: (mode: any) => ipcRenderer.invoke('modbus:setAppMode', mode),
   setMode: (mode: OperatingMode) => ipcRenderer.invoke('modbus:setMode', mode),
   setOutputState: (enabled: boolean) => ipcRenderer.invoke('modbus:setOutputState', enabled),
   setSetpoints: (params: {
@@ -18,6 +19,7 @@ contextBridge.exposeInMainWorld('electronAPI', {
     masterVset?: number;
     masterIset?: number;
   }) => ipcRenderer.invoke('modbus:setSetpoints', params),
+  setSingleSetpoints: (params: { vSet?: number; iSet?: number }) => ipcRenderer.invoke('modbus:setSingleSetpoints', params),
 
   // Register Map CSV
   loadRegisterMapCsv: (csvContent: string) => ipcRenderer.invoke('modbus:loadRegisterMapCsv', csvContent),
@@ -28,6 +30,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
     ipcRenderer.on('modbus:telemetry', subscription);
     return () => {
       ipcRenderer.removeListener('modbus:telemetry', subscription);
+    };
+  },
+  onSingleTelemetry: (callback: (telemetry: any) => void) => {
+    const subscription = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('modbus:singleTelemetry', subscription);
+    return () => {
+      ipcRenderer.removeListener('modbus:singleTelemetry', subscription);
     };
   },
   onStatusChange: (callback: (status: any) => void) => {

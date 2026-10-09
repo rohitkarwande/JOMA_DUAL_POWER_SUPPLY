@@ -95,6 +95,10 @@ function registerIpcHandlers() {
   });
 
   // Power Supply Hardware Control Handlers
+  ipcMain.handle('modbus:setAppMode', async (_event, mode) => {
+    return await modbusService!.setAppMode(mode);
+  });
+
   ipcMain.handle('modbus:setMode', async (_event, mode) => {
     return await modbusService!.setMode(mode);
   });
@@ -105,6 +109,10 @@ function registerIpcHandlers() {
 
   ipcMain.handle('modbus:setSetpoints', async (_event, params) => {
     return await modbusService!.setSetpoints(params);
+  });
+
+  ipcMain.handle('modbus:setSingleSetpoints', async (_event, params) => {
+    return await modbusService!.setSingleSetpoints(params);
   });
 
   ipcMain.handle('modbus:loadRegisterMapCsv', async (_event, csvContent) => {

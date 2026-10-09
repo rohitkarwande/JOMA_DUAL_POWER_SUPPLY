@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { Play, Square, Plus, Trash2, ListOrdered, Layers, AlertTriangle } from 'lucide-react';
+import { Play, Square, Plus, Trash2, ListOrdered, Layers, AlertTriangle, ShieldAlert } from 'lucide-react';
 import { SequenceStep, OperatingMode, DualPSTelemetry } from '../types/powerSupply';
 import { SequenceProgress } from '../../electron/modbusRtuService';
 import { LiveChart } from './LiveChart';
@@ -7,6 +7,7 @@ import { LiveChart } from './LiveChart';
 interface SequenceBuilderProps {
   connected: boolean;
   outputState: string;
+  hardwareMode?: OperatingMode;
   onRunSequence: (steps: SequenceStep[], cycles: number) => void;
   onStopSequence: () => void;
   isRunning: boolean;
@@ -19,6 +20,7 @@ interface SequenceBuilderProps {
 export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
   connected,
   outputState,
+  hardwareMode = 'ISOLATED',
   onRunSequence,
   onStopSequence,
   isRunning,
@@ -27,58 +29,23 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
   maxVoltage = 60.0,
   maxCurrent = 10.0,
 }) => {
-  const [sequenceMode, setSequenceMode] = useState<OperatingMode>('ISOLATED');
   const [limitWarning, setLimitWarning] = useState<string | null>(null);
+  const [cycles, setCycles] = useState<number | string>(1);
 
-  const [modeCycles, setModeCycles] = useState<Record<OperatingMode, number | string>>({
-    ISOLATED: 1,
-    PARALLEL: 1,
-    SERIES: 1,
-  });
+  const [steps, setSteps] = useState<any[]>([
+    {
+      id: 'step_iso_1',
+      stepNumber: 1,
+      durationSeconds: 10,
+      mode: 'ISOLATED',
+      ch1Vset: 12.0,
+      ch1Iset: 1.5,
+      ch2Vset: 12.0,
+      ch2Iset: 1.5,
+    },
+  ]);
 
-  const [modeSteps, setModeSteps] = useState<Record<OperatingMode, any[]>>({
-    ISOLATED: [
-      {
-        id: 'step_iso_1',
-        stepNumber: 1,
-        durationSeconds: 10,
-        mode: 'ISOLATED',
-        ch1Vset: 12.0,
-        ch1Iset: 1.5,
-        ch2Vset: 12.0,
-        ch2Iset: 1.5,
-      },
-    ],
-    PARALLEL: [
-      {
-        id: 'step_par_1',
-        stepNumber: 1,
-        durationSeconds: 10,
-        mode: 'PARALLEL',
-        masterVset: 12.0,
-        ch1Iset: 1.5,
-        ch2Iset: 1.5,
-        ch1Vset: 12.0,
-        ch2Vset: 12.0,
-      },
-    ],
-    SERIES: [
-      {
-        id: 'step_ser_1',
-        stepNumber: 1,
-        durationSeconds: 10,
-        mode: 'SERIES',
-        masterIset: 1.5,
-        ch1Vset: 12.0,
-        ch2Vset: 12.0,
-        ch1Iset: 1.5,
-        ch2Iset: 1.5,
-      },
-    ],
-  });
-
-  const steps = modeSteps[sequenceMode] || [];
-  const cycles = modeCycles[sequenceMode] ?? 1;
+  const isHardwareIsolated = hardwareMode === 'ISOLATED';
 
   const handleAddStep = () => {
     const nextNum = steps.length + 1;
@@ -86,27 +53,21 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
       id: `step_${Date.now()}`,
       stepNumber: nextNum,
       durationSeconds: 10,
-      mode: sequenceMode,
+      mode: 'ISOLATED',
       ch1Vset: 12.0,
       ch1Iset: 1.0,
       ch2Vset: 12.0,
       ch2Iset: 1.0,
-      masterVset: 12.0,
-      masterIset: 1.0,
     };
-    setModeSteps((prev) => ({
-      ...prev,
-      [sequenceMode]: [...prev[sequenceMode], newStep],
-    }));
+    setSteps((prev) => [...prev, newStep]);
   };
 
   const handleRemoveStep = (id: string) => {
-    setModeSteps((prev) => ({
-      ...prev,
-      [sequenceMode]: prev[sequenceMode]
+    setSteps((prev) =>
+      prev
         .filter((s) => s.id !== id)
-        .map((s, idx) => ({ ...s, stepNumber: idx + 1 })),
-    }));
+        .map((s, idx) => ({ ...s, stepNumber: idx + 1 }))
+    );
   };
 
   const handleUpdateStep = (id: string, field: string, val: any) => {
@@ -122,39 +83,29 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
       }
     }
     setLimitWarning(null);
-    setModeSteps((prev) => ({
-      ...prev,
-      [sequenceMode]: prev[sequenceMode].map((s) => (s.id === id ? { ...s, [field]: val } : s)),
-    }));
-  };
-
-  const handleModeChange = (newMode: OperatingMode) => {
-    setSequenceMode(newMode);
-    setLimitWarning(null);
-  };
-
-  const setCycles = (val: number | string) => {
-    setModeCycles((prev) => ({
-      ...prev,
-      [sequenceMode]: val,
-    }));
+    setSteps((prev) =>
+      prev.map((s) => (s.id === id ? { ...s, [field]: val } : s))
+    );
   };
 
   const handleStartSequence = () => {
+    if (!isHardwareIsolated) {
+      setLimitWarning(`⚠️ Cannot start sequence: Hardware Register 4X 29 must be in ISOLATED mode (Current: ${hardwareMode}).`);
+      return;
+    }
+
     // Validate all setpoints before launching sequence
     for (const s of steps) {
       const v1 = parseFloat(String(s.ch1Vset)) || 0;
       const v2 = parseFloat(String(s.ch2Vset)) || 0;
-      const mV = parseFloat(String(s.masterVset)) || 0;
       const i1 = parseFloat(String(s.ch1Iset)) || 0;
       const i2 = parseFloat(String(s.ch2Iset)) || 0;
-      const mI = parseFloat(String(s.masterIset)) || 0;
 
-      if (v1 > maxVoltage || v2 > maxVoltage || mV > maxVoltage) {
+      if (v1 > maxVoltage || v2 > maxVoltage) {
         setLimitWarning(`⚠️ Cannot start sequence: Step ${s.stepNumber} voltage exceeds V_max limit (${maxVoltage} V).`);
         return;
       }
-      if (i1 > maxCurrent || i2 > maxCurrent || mI > maxCurrent) {
+      if (i1 > maxCurrent || i2 > maxCurrent) {
         setLimitWarning(`⚠️ Cannot start sequence: Step ${s.stepNumber} current exceeds I_max limit (${maxCurrent} A).`);
         return;
       }
@@ -163,14 +114,14 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
     setLimitWarning(null);
 
     const sanitizedSteps: SequenceStep[] = steps.map((s) => ({
-      ...s,
+      id: s.id,
+      stepNumber: s.stepNumber,
+      mode: 'ISOLATED',
       durationSeconds: Math.max(1, parseFloat(String(s.durationSeconds)) || 1),
       ch1Vset: parseFloat(String(s.ch1Vset)) || 0,
       ch1Iset: parseFloat(String(s.ch1Iset)) || 0,
       ch2Vset: parseFloat(String(s.ch2Vset)) || 0,
       ch2Iset: parseFloat(String(s.ch2Iset)) || 0,
-      masterVset: s.masterVset !== undefined ? parseFloat(String(s.masterVset)) || 0 : undefined,
-      masterIset: s.masterIset !== undefined ? parseFloat(String(s.masterIset)) || 0 : undefined,
     }));
     const sanitizedCycles = Math.max(1, parseInt(String(cycles), 10) || 1);
     onRunSequence(sanitizedSteps, sanitizedCycles);
@@ -184,32 +135,22 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
           <ListOrdered className="w-5 h-5 text-sky-600" />
           <div>
             <h2 className="text-xl font-extrabold text-slate-800">Automated Sequence / Recipe Builder</h2>
-            <p className="text-xs text-slate-500 font-semibold">Multi-step test execution engine</p>
+            <p className="text-xs text-slate-500 font-semibold">Multi-step test execution engine (Isolated Mode)</p>
           </div>
         </div>
 
         <div className="flex flex-wrap items-center gap-4">
-          {/* Universal Mode Selection */}
-          <div className="flex items-center gap-2 bg-slate-100 p-1.5 rounded-xl border border-slate-200">
-            <span className="text-xs font-black text-slate-600 px-2 flex items-center gap-1.5">
+          {/* Read-Only Recipe Mode Badge */}
+          <div className="flex items-center gap-2 bg-slate-100 px-3 py-1.5 rounded-xl border border-slate-200">
+            <span className="text-xs font-black text-slate-600 flex items-center gap-1.5">
               <Layers className="w-4 h-4 text-sky-600" /> RECIPE MODE:
             </span>
-            {(['ISOLATED', 'PARALLEL', 'SERIES'] as const).map((m) => (
-              <button
-                key={m}
-                onClick={() => handleModeChange(m)}
-                className={`px-3.5 py-1.5 rounded-lg text-xs font-black transition-all ${
-                  sequenceMode === m
-                    ? 'bg-sky-600 text-white shadow-sm ring-1 ring-sky-700'
-                    : 'text-slate-700 hover:bg-slate-200 hover:text-slate-900'
-                }`}
-              >
-                {m}
-              </button>
-            ))}
+            <span className="px-3 py-1 rounded-lg text-xs font-black bg-sky-600 text-white shadow-xs tracking-wide uppercase">
+              ISOLATED (READ-ONLY)
+            </span>
           </div>
 
-          {/* Enlarged Total Cycles Box */}
+          {/* Total Cycles Box */}
           <div className="flex items-center gap-2 bg-slate-50 border border-slate-200 px-3.5 py-1.5 rounded-xl text-xs font-bold shadow-2xs">
             <span className="text-slate-700 font-extrabold whitespace-nowrap">Total Cycles:</span>
             <input
@@ -230,10 +171,10 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
             <Plus className="w-4 h-4" /> Add Step
           </button>
 
-          {/* START SEQUENCE Button (Enabled ONLY when Output is OFF & Connected) */}
+          {/* START SEQUENCE Button (Enabled ONLY when Connected, Output OFF, & Hardware is in ISOLATED mode) */}
           {(() => {
             const isRunningOrInit = isRunning || progress?.status === 'INITIALIZING' || progress?.status === 'RUNNING';
-            const isStartDisabled = !connected || outputState !== 'OFF' || isRunningOrInit || steps.length === 0;
+            const isStartDisabled = !connected || outputState !== 'OFF' || isRunningOrInit || steps.length === 0 || !isHardwareIsolated;
             const isStopDisabled = !isRunningOrInit;
 
             return (
@@ -246,6 +187,8 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
                       ? 'Hardware is disconnected'
                       : outputState !== 'OFF'
                       ? 'Hardware Output is ON — Turn Output OFF first to enable START SEQUENCE'
+                      : !isHardwareIsolated
+                      ? `Hardware Register 4X 29 is in ${hardwareMode} mode. Test Sequence requires ISOLATED mode.`
                       : isRunningOrInit
                       ? 'Sequence is currently active'
                       : steps.length === 0
@@ -281,6 +224,16 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
           })()}
         </div>
       </div>
+
+      {/* Hardware Register Mode Interlock Warning Banner */}
+      {connected && !isHardwareIsolated && (
+        <div className="bg-amber-50 border border-amber-300 text-amber-900 px-4 py-3 rounded-xl flex items-center gap-3 text-xs font-bold shadow-2xs">
+          <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0" />
+          <span>
+            ⚠️ <strong>Hardware Interlock:</strong> Automated Test Sequence execution is disabled because Hardware Register 4X 29 is currently set to <span className="underline font-black">{hardwareMode}</span> mode. Hardware Register 4X 29 must be in <strong>ISOLATED</strong> mode to start a sequence.
+          </span>
+        </div>
+      )}
 
       {/* Limit Warning Alert Banner */}
       {limitWarning && (
@@ -347,39 +300,17 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
         </div>
       )}
 
-      {/* Steps Table with Dynamic Mode Columns */}
+      {/* Steps Table (ISOLATED Mode Only) */}
       <div className="flex-1 overflow-y-auto border border-slate-200 rounded-lg">
         <table className="w-full text-left text-sm">
           <thead className="bg-slate-50 border-b border-slate-200 text-slate-600 font-extrabold text-xs uppercase tracking-wider">
             <tr>
               <th className="p-3">Step #</th>
               <th className="p-3">Duration (sec)</th>
-
-              {sequenceMode === 'ISOLATED' && (
-                <>
-                  <th className="p-3 text-sky-700">CH1 Vset (V)</th>
-                  <th className="p-3 text-sky-700">CH1 Iset (A)</th>
-                  <th className="p-3 text-blue-700">CH2 Vset (V)</th>
-                  <th className="p-3 text-blue-700">CH2 Iset (A)</th>
-                </>
-              )}
-
-              {sequenceMode === 'PARALLEL' && (
-                <>
-                  <th className="p-3 text-indigo-700">Master Parallel Vset (Reg 4X 21)</th>
-                  <th className="p-3 text-sky-700">CH1 Iset (Reg 4X 11)</th>
-                  <th className="p-3 text-blue-700">CH2 Iset (Reg 4X 15)</th>
-                </>
-              )}
-
-              {sequenceMode === 'SERIES' && (
-                <>
-                  <th className="p-3 text-amber-700">Master Series Iset (Reg 4X 27)</th>
-                  <th className="p-3 text-sky-700">CH1 Vset (Reg 4X 9)</th>
-                  <th className="p-3 text-blue-700">CH2 Vset (Reg 4X 13)</th>
-                </>
-              )}
-
+              <th className="p-3 text-sky-700">CH1 Vset (V)</th>
+              <th className="p-3 text-sky-700">CH1 Iset (A)</th>
+              <th className="p-3 text-blue-700">CH2 Vset (V)</th>
+              <th className="p-3 text-blue-700">CH2 Iset (A)</th>
               <th className="p-3 text-right">Delete</th>
             </tr>
           </thead>
@@ -397,113 +328,42 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
                   />
                 </td>
 
-                {/* ISOLATED Mode Setpoints */}
-                {sequenceMode === 'ISOLATED' && (
-                  <>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={s.ch1Vset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch1Vset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-sky-700 focus:ring-2 focus:ring-sky-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.0001"
-                        value={s.ch1Iset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch1Iset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-sky-700 focus:ring-2 focus:ring-sky-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={s.ch2Vset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch2Vset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-blue-700 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.0001"
-                        value={s.ch2Iset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch2Iset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-blue-700 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                  </>
-                )}
-
-                {/* PARALLEL Mode Setpoints */}
-                {sequenceMode === 'PARALLEL' && (
-                  <>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={s.masterVset ?? s.ch1Vset}
-                        onChange={(e) => handleUpdateStep(s.id, 'masterVset', e.target.value)}
-                        className="w-40 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-indigo-700 focus:ring-2 focus:ring-indigo-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.0001"
-                        value={s.ch1Iset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch1Iset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-sky-700 focus:ring-2 focus:ring-sky-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.0001"
-                        value={s.ch2Iset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch2Iset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-blue-700 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                  </>
-                )}
-
-                {/* SERIES Mode Setpoints */}
-                {sequenceMode === 'SERIES' && (
-                  <>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.0001"
-                        value={s.masterIset ?? s.ch1Iset}
-                        onChange={(e) => handleUpdateStep(s.id, 'masterIset', e.target.value)}
-                        className="w-40 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-amber-700 focus:ring-2 focus:ring-amber-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={s.ch1Vset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch1Vset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-sky-700 focus:ring-2 focus:ring-sky-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                    <td className="p-3">
-                      <input
-                        type="number"
-                        step="0.001"
-                        value={s.ch2Vset}
-                        onChange={(e) => handleUpdateStep(s.id, 'ch2Vset', e.target.value)}
-                        className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-blue-700 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-2xs"
-                      />
-                    </td>
-                  </>
-                )}
+                <td className="p-3">
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={s.ch1Vset}
+                    onChange={(e) => handleUpdateStep(s.id, 'ch1Vset', e.target.value)}
+                    className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-sky-700 focus:ring-2 focus:ring-sky-500 focus:outline-none shadow-2xs"
+                  />
+                </td>
+                <td className="p-3">
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={s.ch1Iset}
+                    onChange={(e) => handleUpdateStep(s.id, 'ch1Iset', e.target.value)}
+                    className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-sky-700 focus:ring-2 focus:ring-sky-500 focus:outline-none shadow-2xs"
+                  />
+                </td>
+                <td className="p-3">
+                  <input
+                    type="number"
+                    step="0.001"
+                    value={s.ch2Vset}
+                    onChange={(e) => handleUpdateStep(s.id, 'ch2Vset', e.target.value)}
+                    className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-blue-700 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-2xs"
+                  />
+                </td>
+                <td className="p-3">
+                  <input
+                    type="number"
+                    step="0.0001"
+                    value={s.ch2Iset}
+                    onChange={(e) => handleUpdateStep(s.id, 'ch2Iset', e.target.value)}
+                    className="w-36 bg-white border border-slate-300 rounded-lg px-3 py-2 font-mono text-sm font-black text-blue-700 focus:ring-2 focus:ring-blue-500 focus:outline-none shadow-2xs"
+                  />
+                </td>
 
                 <td className="p-3 text-right">
                   <button
@@ -526,3 +386,4 @@ export const SequenceBuilder: React.FC<SequenceBuilderProps> = ({
     </div>
   );
 };
+

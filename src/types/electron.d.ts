@@ -1,4 +1,4 @@
-import { DualPSTelemetry, OperatingMode, SerialSettings, SequenceRecipe, TestSessionRecord } from './powerSupply';
+import { DualPSTelemetry, SinglePSTelemetry, AppMode, OperatingMode, SerialSettings, SequenceRecipe, TestSessionRecord } from './powerSupply';
 
 export interface ElectronAPI {
   // Connection & Serial Management
@@ -6,7 +6,8 @@ export interface ElectronAPI {
   connectSerial: (settings: SerialSettings) => Promise<{ success: boolean; error?: string }>;
   disconnectSerial: () => Promise<boolean>;
 
-  // Power Supply Commands
+  // Power Supply Commands & Application Mode
+  setAppMode: (mode: AppMode) => Promise<{ success: boolean; error?: string }>;
   setMode: (mode: OperatingMode) => Promise<boolean>;
   setOutputState: (enabled: boolean) => Promise<boolean>;
   setSetpoints: (params: {
@@ -17,6 +18,7 @@ export interface ElectronAPI {
     masterVset?: number;
     masterIset?: number;
   }) => Promise<boolean>;
+  setSingleSetpoints: (params: { vSet?: number; iSet?: number }) => Promise<boolean>;
 
   // Register Map Loader
   loadRegisterMapCsv: (csvContent: string) => Promise<{ success: boolean; count: number; error?: string }>;
@@ -28,6 +30,7 @@ export interface ElectronAPI {
 
   // Streaming Telemetry & Event Listeners
   onTelemetry: (callback: (telemetry: DualPSTelemetry) => void) => () => void;
+  onSingleTelemetry: (callback: (telemetry: SinglePSTelemetry) => void) => () => void;
   onStatusChange: (callback: (status: { connected: boolean; port?: string; error?: string }) => void) => () => void;
   onSequenceProgress: (callback: (progress: any) => void) => () => void;
 

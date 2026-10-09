@@ -6,11 +6,14 @@ import { ParallelView } from './components/ParallelView';
 import { LiveChart } from './components/LiveChart';
 import { HistoryView } from './components/HistoryView';
 import { SequenceBuilder } from './components/SequenceBuilder';
+import { SinglePowerSupplyView } from './components/SinglePowerSupplyView';
 import { SettingsModal } from './components/SettingsModal';
-import { DualPSTelemetry, SerialSettings, OutputState } from './types/powerSupply';
+import { DualPSTelemetry, SinglePSTelemetry, AppMode, SerialSettings, OutputState } from './types/powerSupply';
 import { Activity, History, ListOrdered, Zap, Layers } from 'lucide-react';
 
 export const App: React.FC = () => {
+  const [appMode, setAppMode] = useState<AppMode>('DUAL_PS');
+
   const [telemetry, setTelemetry] = useState<DualPSTelemetry>({
     timestamp: Date.now(),
     mode: 'ISOLATED',
@@ -31,7 +34,24 @@ export const App: React.FC = () => {
     },
   });
 
+  const [singleTelemetry, setSingleTelemetry] = useState<SinglePSTelemetry>({
+    timestamp: Date.now(),
+    outputState: 'OFF',
+    vMon: 0,
+    iMon: 0,
+    vSet: 0,
+    iSet: 0,
+    powerActual: 0,
+    alarms: {
+      commFault: false,
+      emergencyStop: false,
+    },
+    maxVoltage: 60.0,
+    maxCurrent: 10.0,
+  });
+
   const [telemetryHistory, setTelemetryHistory] = useState<DualPSTelemetry[]>([]);
+  const [singleTelemetryHistory, setSingleTelemetryHistory] = useState<any[]>([]);
   const [connected, setConnected] = useState<boolean>(false);
   const [activeTab, setActiveTab] = useState<'CONTROL' | 'SEQUENCE' | 'HISTORY'>('CONTROL');
   const [isSettingsOpen, setIsSettingsOpen] = useState<boolean>(false);
@@ -58,6 +78,11 @@ export const App: React.FC = () => {
         setTelemetryHistory((prev) => [...prev.slice(-100), data]);
       });
 
+      const unsubSingleTelemetry = window.electronAPI.onSingleTelemetry((data) => {
+        setSingleTelemetry(data);
+        setSingleTelemetryHistory((prev) => [...prev.slice(-100), data]);
+      });
+
       const unsubStatus = window.electronAPI.onStatusChange((status) => {
         setConnected(status.connected);
       });
@@ -69,19 +94,37 @@ export const App: React.FC = () => {
 
       return () => {
         unsubTelemetry();
+        unsubSingleTelemetry();
         unsubStatus();
         unsubSeq();
       };
     }
   }, []);
 
+  const activeOutputState: OutputState = appMode === 'SINGLE_PS' ? singleTelemetry.outputState : telemetry.outputState;
+
   // Handlers
+  const handleSelectAppMode = async (newMode: AppMode) => {
+    if (window.electronAPI) {
+      const res = await window.electronAPI.setAppMode(newMode);
+      if (!res.success) {
+        alert(res.error || 'Failed to switch application mode');
+        return;
+      }
+    }
+    setAppMode(newMode);
+  };
+
   const handleToggleOutput = async () => {
-    const nextState: OutputState = telemetry.outputState === 'ON' ? 'OFF' : 'ON';
+    const nextState: OutputState = activeOutputState === 'ON' ? 'OFF' : 'ON';
     if (window.electronAPI) {
       await window.electronAPI.setOutputState(nextState === 'ON');
     }
-    setTelemetry((prev) => ({ ...prev, outputState: nextState }));
+    if (appMode === 'SINGLE_PS') {
+      setSingleTelemetry((prev) => ({ ...prev, outputState: nextState }));
+    } else {
+      setTelemetry((prev) => ({ ...prev, outputState: nextState }));
+    }
   };
 
   const handleRunSequence = async (steps: any[], cycles: number) => {
@@ -130,6 +173,17 @@ export const App: React.FC = () => {
     }));
   };
 
+  const handleUpdateSingleSetpoints = async (params: { vSet?: number; iSet?: number }) => {
+    if (window.electronAPI) {
+      await window.electronAPI.setSingleSetpoints(params);
+    }
+    setSingleTelemetry((prev) => ({
+      ...prev,
+      vSet: params.vSet !== undefined ? params.vSet : prev.vSet,
+      iSet: params.iSet !== undefined ? params.iSet : prev.iSet,
+    }));
+  };
+
   const handleSaveSettings = async (newSettings: SerialSettings) => {
     setSerialSettings(newSettings);
     if (window.electronAPI) {
@@ -148,7 +202,7 @@ export const App: React.FC = () => {
   const isSequenceActive = sequenceProgress?.status === 'INITIALIZING' || sequenceProgress?.status === 'RUNNING';
 
   // Priority 2: Sequence NOT active AND hardware Output = ON -> Normal Output Lock applies
-  const isNormalOutputLockActive = !isSequenceActive && telemetry.outputState === 'ON';
+  const isNormalOutputLockActive = !isSequenceActive && activeOutputState === 'ON';
 
   // Automatically force switch to MAIN CONTROL HMI when Output is ON in Normal Mode
   useEffect(() => {
@@ -163,7 +217,8 @@ export const App: React.FC = () => {
       <Header
         connected={connected}
         activePort={serialSettings.port}
-        outputState={telemetry.outputState}
+        outputState={activeOutputState}
+        appMode={appMode}
         activeMode={telemetry.mode}
         onToggleOutput={handleToggleOutput}
         onOpenSettings={() => {
@@ -171,222 +226,243 @@ export const App: React.FC = () => {
             setIsSettingsOpen(true);
           }
         }}
+        onSelectAppMode={handleSelectAppMode}
         onSelectMode={handleSelectMode}
       />
 
-      {/* Sub-Header Navigation Tabs */}
-      <div className="bg-white border-b border-slate-200 px-6 flex items-center justify-between shadow-2xs">
-        <div className="flex items-center gap-1">
-          <button
-            onClick={() => setActiveTab('CONTROL')}
-            className={`px-5 py-3 font-bold text-xs flex items-center gap-2 border-b-2 transition-all ${
-              activeTab === 'CONTROL'
-                ? 'border-sky-600 text-sky-600 bg-sky-50/50'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <Activity className="w-4 h-4" /> MAIN CONTROL HMI
-          </button>
+      {/* Mode-Based Sub-Header & Main Rendering */}
+      {appMode === 'SINGLE_PS' ? (
+        /* SINGLE POWER SUPPLY INTERFACE */
+        <main className="flex-1 p-4 flex flex-col overflow-y-auto">
+          <SinglePowerSupplyView
+            telemetry={singleTelemetry}
+            connected={connected}
+            onUpdateSetpoints={handleUpdateSingleSetpoints}
+            onToggleOutput={handleToggleOutput}
+            telemetryHistory={singleTelemetryHistory}
+            maxVoltage={singleTelemetry.maxVoltage}
+            maxCurrent={singleTelemetry.maxCurrent}
+          />
+        </main>
+      ) : (
+        /* DUAL POWER SUPPLY INTERFACE */
+        <>
+          {/* Sub-Header Navigation Tabs */}
+          <div className="bg-white border-b border-slate-200 px-6 flex items-center justify-between shadow-2xs">
+            <div className="flex items-center gap-1">
+              <button
+                onClick={() => setActiveTab('CONTROL')}
+                className={`px-5 py-3 font-bold text-xs flex items-center gap-2 border-b-2 transition-all ${
+                  activeTab === 'CONTROL'
+                    ? 'border-sky-600 text-sky-600 bg-sky-50/50'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <Activity className="w-4 h-4" /> MAIN CONTROL HMI
+              </button>
 
-          {/* SEQUENCE BUILDER TAB */}
-          <button
-            disabled={isNormalOutputLockActive}
-            onClick={() => !isNormalOutputLockActive && setActiveTab('SEQUENCE')}
-            title={
-              isNormalOutputLockActive
-                ? 'Normal Output is ON — Turn Output OFF to access Sequence Builder'
-                : 'Sequence Builder & Execution Engine'
-            }
-            className={`px-5 py-3 font-bold text-xs flex items-center gap-2 border-b-2 transition-all ${
-              isNormalOutputLockActive
-                ? 'border-transparent text-slate-300 cursor-not-allowed'
-                : activeTab === 'SEQUENCE'
-                ? 'border-sky-600 text-sky-600 bg-sky-50/50'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <ListOrdered className="w-4 h-4" /> SEQUENCE BUILDER
-          </button>
+              {/* SEQUENCE BUILDER TAB */}
+              <button
+                disabled={isNormalOutputLockActive}
+                onClick={() => !isNormalOutputLockActive && setActiveTab('SEQUENCE')}
+                title={
+                  isNormalOutputLockActive
+                    ? 'Normal Output is ON — Turn Output OFF to access Sequence Builder'
+                    : 'Sequence Builder & Execution Engine'
+                }
+                className={`px-5 py-3 font-bold text-xs flex items-center gap-2 border-b-2 transition-all ${
+                  isNormalOutputLockActive
+                    ? 'border-transparent text-slate-300 cursor-not-allowed'
+                    : activeTab === 'SEQUENCE'
+                    ? 'border-sky-600 text-sky-600 bg-sky-50/50'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <ListOrdered className="w-4 h-4" /> SEQUENCE BUILDER
+              </button>
 
-          {/* SQLITE HISTORY TAB */}
-          <button
-            disabled={isNormalOutputLockActive || isSequenceActive}
-            onClick={() => !isNormalOutputLockActive && !isSequenceActive && setActiveTab('HISTORY')}
-            title={
-              isNormalOutputLockActive || isSequenceActive
-                ? 'Output Active — Tab locked for safety'
-                : 'SQLite History & CSV Export'
-            }
-            className={`px-5 py-3 font-bold text-xs flex items-center gap-2 border-b-2 transition-all ${
-              isNormalOutputLockActive || isSequenceActive
-                ? 'border-transparent text-slate-300 cursor-not-allowed'
-                : activeTab === 'HISTORY'
-                ? 'border-sky-600 text-sky-600 bg-sky-50/50'
-                : 'border-transparent text-slate-500 hover:text-slate-800'
-            }`}
-          >
-            <History className="w-4 h-4" /> SQLITE HISTORY & CSV EXPORT
-          </button>
-        </div>
-
-        {/* Dynamic Mode Status Indicator */}
-        <div className="text-xs font-semibold text-slate-500">
-          Hardware Register 4X 29 Mode: <span className="font-bold text-sky-700">{telemetry.mode}</span>
-        </div>
-      </div>
-
-      {/* Safety Alert Banner for Normal Output Lock */}
-      {isNormalOutputLockActive && (
-        <div className="bg-rose-50 border-b border-rose-200 px-6 py-2.5 text-rose-900 text-xs font-bold flex flex-wrap items-center justify-between gap-4 shadow-2xs">
-          <div className="flex items-center gap-3">
-            <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping" />
-            <span className="font-extrabold uppercase tracking-wide">
-              SAFETY INTERLOCK: Hardware Output is ON (Normal Mode)
-            </span>
-            <span className="text-rose-700 font-semibold font-mono">
-              [Configuration tabs & Settings are locked while output is energized]
-            </span>
-          </div>
-          <button
-            onClick={handleToggleOutput}
-            className="px-4 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-extrabold text-xs uppercase shadow-xs transition-colors"
-          >
-            TURN OUTPUT OFF
-          </button>
-        </div>
-      )}
-
-      {/* Main View Area */}
-      <main className="flex-1 p-4 flex flex-col overflow-y-auto">
-        {activeTab === 'CONTROL' && (
-          <div className="flex flex-col gap-3.5">
-            {/* Prominent Compact Operating Mode Control Banner */}
-            <div className="bg-white rounded-xl border border-slate-200 p-3 px-4 shadow-2xs flex flex-col md:flex-row items-center justify-between gap-3">
-              <div className="flex items-center gap-3">
-                <div className="p-2 bg-sky-100 border border-sky-200 rounded-lg text-sky-700">
-                  <Activity className="w-5 h-5" />
-                </div>
-                <div>
-                  <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider block">
-                    ACTIVE OPERATING MODE (REG 4X 29)
-                  </span>
-                  <div className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2.5 mt-0.5">
-                    <span className="text-sky-700">{telemetry.mode} MODE</span>
-                    <span className="text-[10px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 uppercase flex items-center gap-1">
-                      <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> ONLINE
-                    </span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Mode Switcher Buttons */}
-              <div className="flex items-center gap-2 bg-slate-50 p-1 rounded-lg border border-slate-200 w-full md:w-auto justify-stretch">
-                <button
-                  onClick={() => handleSelectMode('ISOLATED')}
-                  className={`flex-1 md:flex-initial px-3.5 py-1.5 rounded-md font-black text-xs flex items-center justify-center gap-1.5 transition-all ${
-                    telemetry.mode === 'ISOLATED'
-                      ? 'bg-sky-600 text-white shadow-2xs'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  <Layers className="w-3.5 h-3.5" /> ISOLATED
-                </button>
-
-                <button
-                  onClick={() => handleSelectMode('PARALLEL')}
-                  className={`flex-1 md:flex-initial px-3.5 py-1.5 rounded-md font-black text-xs flex items-center justify-center gap-1.5 transition-all ${
-                    telemetry.mode === 'PARALLEL'
-                      ? 'bg-indigo-600 text-white shadow-2xs'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  <Layers className="w-3.5 h-3.5" /> PARALLEL
-                </button>
-
-                <button
-                  onClick={() => handleSelectMode('SERIES')}
-                  className={`flex-1 md:flex-initial px-3.5 py-1.5 rounded-md font-black text-xs flex items-center justify-center gap-1.5 transition-all ${
-                    telemetry.mode === 'SERIES'
-                      ? 'bg-amber-600 text-white shadow-2xs'
-                      : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
-                  }`}
-                >
-                  <Zap className="w-3.5 h-3.5" /> SERIES
-                </button>
-              </div>
+              {/* SQLITE HISTORY TAB */}
+              <button
+                disabled={isNormalOutputLockActive || isSequenceActive}
+                onClick={() => !isNormalOutputLockActive && !isSequenceActive && setActiveTab('HISTORY')}
+                title={
+                  isNormalOutputLockActive || isSequenceActive
+                    ? 'Output Active — Tab locked for safety'
+                    : 'SQLite History & CSV Export'
+                }
+                className={`px-5 py-3 font-bold text-xs flex items-center gap-2 border-b-2 transition-all ${
+                  isNormalOutputLockActive || isSequenceActive
+                    ? 'border-transparent text-slate-300 cursor-not-allowed'
+                    : activeTab === 'HISTORY'
+                    ? 'border-sky-600 text-sky-600 bg-sky-50/50'
+                    : 'border-transparent text-slate-500 hover:text-slate-800'
+                }`}
+              >
+                <History className="w-4 h-4" /> SQLITE HISTORY & CSV EXPORT
+              </button>
             </div>
 
-            {telemetry.mode === 'ISOLATED' && (
-              <div className="grid grid-cols-2 gap-4">
-                <ChannelCard
-                  channelNumber={1}
-                  title="CHANNEL 1 (ISOLATED)"
-                  voltageActual={telemetry.ch1.voltageActual}
-                  currentActual={telemetry.ch1.currentActual}
-                  voltageSetpoint={telemetry.ch1.voltageSetpoint}
-                  currentSetpoint={telemetry.ch1.currentSetpoint}
-                  powerActual={telemetry.ch1.powerActual}
-                  maxVoltage={telemetry.maxVoltage}
-                  maxCurrent={telemetry.maxCurrent}
-                  onUpdateVset={(val) => handleUpdateSetpoints({ ch1Vset: val })}
-                  onUpdateIset={(val) => handleUpdateSetpoints({ ch1Iset: val })}
-                />
-                <ChannelCard
-                  channelNumber={2}
-                  title="CHANNEL 2 (ISOLATED)"
-                  voltageActual={telemetry.ch2.voltageActual}
-                  currentActual={telemetry.ch2.currentActual}
-                  voltageSetpoint={telemetry.ch2.voltageSetpoint}
-                  currentSetpoint={telemetry.ch2.currentSetpoint}
-                  powerActual={telemetry.ch2.powerActual}
-                  isCh2Theme={true}
-                  maxVoltage={telemetry.maxVoltage}
-                  maxCurrent={telemetry.maxCurrent}
-                  onUpdateVset={(val) => handleUpdateSetpoints({ ch2Vset: val })}
-                  onUpdateIset={(val) => handleUpdateSetpoints({ ch2Iset: val })}
-                />
+            {/* Dynamic Mode Status Indicator */}
+            <div className="text-xs font-semibold text-slate-500">
+              Hardware Register 4X 29 Mode: <span className="font-bold text-sky-700">{telemetry.mode}</span>
+            </div>
+          </div>
+
+          {/* Safety Alert Banner for Normal Output Lock */}
+          {isNormalOutputLockActive && (
+            <div className="bg-rose-50 border-b border-rose-200 px-6 py-2.5 text-rose-900 text-xs font-bold flex flex-wrap items-center justify-between gap-4 shadow-2xs">
+              <div className="flex items-center gap-3">
+                <span className="w-2.5 h-2.5 rounded-full bg-rose-600 animate-ping" />
+                <span className="font-extrabold uppercase tracking-wide">
+                  SAFETY INTERLOCK: Hardware Output is ON (Normal Mode)
+                </span>
+                <span className="text-rose-700 font-semibold font-mono">
+                  [Configuration tabs & Settings are locked while output is energized]
+                </span>
+              </div>
+              <button
+                onClick={handleToggleOutput}
+                className="px-4 py-1 bg-rose-600 hover:bg-rose-700 text-white rounded-lg font-extrabold text-xs uppercase shadow-xs transition-colors"
+              >
+                TURN OUTPUT OFF
+              </button>
+            </div>
+          )}
+
+          {/* Main View Area */}
+          <main className="flex-1 p-4 flex flex-col overflow-y-auto">
+            {activeTab === 'CONTROL' && (
+              <div className="flex flex-col gap-3.5">
+                {/* Prominent Compact Operating Mode Control Banner */}
+                <div className="bg-white rounded-xl border border-slate-200 p-3 px-4 shadow-2xs flex flex-col md:flex-row items-center justify-between gap-3">
+                  <div className="flex items-center gap-3">
+                    <div className="p-2 bg-sky-100 border border-sky-200 rounded-lg text-sky-700">
+                      <Activity className="w-5 h-5" />
+                    </div>
+                    <div>
+                      <span className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider block">
+                        ACTIVE OPERATING MODE (REG 4X 29)
+                      </span>
+                      <div className="text-lg font-black text-slate-900 tracking-tight flex items-center gap-2.5 mt-0.5">
+                        <span className="text-sky-700">{telemetry.mode} MODE</span>
+                        <span className="text-[10px] font-extrabold px-2.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 border border-emerald-200 uppercase flex items-center gap-1">
+                          <span className="w-1.5 h-1.5 rounded-full bg-emerald-500 animate-pulse" /> ONLINE
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* Mode Switcher Buttons */}
+                  <div className="flex items-center gap-2 bg-slate-50 p-1 rounded-lg border border-slate-200 w-full md:w-auto justify-stretch">
+                    <button
+                      onClick={() => handleSelectMode('ISOLATED')}
+                      className={`flex-1 md:flex-initial px-3.5 py-1.5 rounded-md font-black text-xs flex items-center justify-center gap-1.5 transition-all ${
+                        telemetry.mode === 'ISOLATED'
+                          ? 'bg-sky-600 text-white shadow-2xs'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Layers className="w-3.5 h-3.5" /> ISOLATED
+                    </button>
+
+                    <button
+                      onClick={() => handleSelectMode('PARALLEL')}
+                      className={`flex-1 md:flex-initial px-3.5 py-1.5 rounded-md font-black text-xs flex items-center justify-center gap-1.5 transition-all ${
+                        telemetry.mode === 'PARALLEL'
+                          ? 'bg-indigo-600 text-white shadow-2xs'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Layers className="w-3.5 h-3.5" /> PARALLEL
+                    </button>
+
+                    <button
+                      onClick={() => handleSelectMode('SERIES')}
+                      className={`flex-1 md:flex-initial px-3.5 py-1.5 rounded-md font-black text-xs flex items-center justify-center gap-1.5 transition-all ${
+                        telemetry.mode === 'SERIES'
+                          ? 'bg-amber-600 text-white shadow-2xs'
+                          : 'bg-white text-slate-700 border border-slate-200 hover:bg-slate-100'
+                      }`}
+                    >
+                      <Zap className="w-3.5 h-3.5" /> SERIES
+                    </button>
+                  </div>
+                </div>
+
+                {telemetry.mode === 'ISOLATED' && (
+                  <div className="grid grid-cols-2 gap-4">
+                    <ChannelCard
+                      channelNumber={1}
+                      title="CHANNEL 1 (ISOLATED)"
+                      voltageActual={telemetry.ch1.voltageActual}
+                      currentActual={telemetry.ch1.currentActual}
+                      voltageSetpoint={telemetry.ch1.voltageSetpoint}
+                      currentSetpoint={telemetry.ch1.currentSetpoint}
+                      powerActual={telemetry.ch1.powerActual}
+                      maxVoltage={telemetry.maxVoltage}
+                      maxCurrent={telemetry.maxCurrent}
+                      onUpdateVset={(val) => handleUpdateSetpoints({ ch1Vset: val })}
+                      onUpdateIset={(val) => handleUpdateSetpoints({ ch1Iset: val })}
+                    />
+                    <ChannelCard
+                      channelNumber={2}
+                      title="CHANNEL 2 (ISOLATED)"
+                      voltageActual={telemetry.ch2.voltageActual}
+                      currentActual={telemetry.ch2.currentActual}
+                      voltageSetpoint={telemetry.ch2.voltageSetpoint}
+                      currentSetpoint={telemetry.ch2.currentSetpoint}
+                      powerActual={telemetry.ch2.powerActual}
+                      isCh2Theme={true}
+                      maxVoltage={telemetry.maxVoltage}
+                      maxCurrent={telemetry.maxCurrent}
+                      onUpdateVset={(val) => handleUpdateSetpoints({ ch2Vset: val })}
+                      onUpdateIset={(val) => handleUpdateSetpoints({ ch2Iset: val })}
+                    />
+                  </div>
+                )}
+
+                {telemetry.mode === 'SERIES' && (
+                  <SeriesView
+                    telemetry={telemetry}
+                    onUpdateMasterIset={(val) => handleUpdateSetpoints({ masterIset: val })}
+                    onUpdateCh1Vset={(val) => handleUpdateSetpoints({ ch1Vset: val })}
+                    onUpdateCh2Vset={(val) => handleUpdateSetpoints({ ch2Vset: val })}
+                  />
+                )}
+
+                {telemetry.mode === 'PARALLEL' && (
+                  <ParallelView
+                    telemetry={telemetry}
+                    onUpdateMasterVset={(val) => handleUpdateSetpoints({ masterVset: val })}
+                    onUpdateCh1Iset={(val) => handleUpdateSetpoints({ ch1Iset: val })}
+                    onUpdateCh2Iset={(val) => handleUpdateSetpoints({ ch2Iset: val })}
+                  />
+                )}
+
+                {/* Live Telemetry Chart embedded inside Main Control HMI */}
+                <LiveChart telemetryHistory={telemetryHistory} />
               </div>
             )}
 
-            {telemetry.mode === 'SERIES' && (
-              <SeriesView
-                telemetry={telemetry}
-                onUpdateMasterIset={(val) => handleUpdateSetpoints({ masterIset: val })}
-                onUpdateCh1Vset={(val) => handleUpdateSetpoints({ ch1Vset: val })}
-                onUpdateCh2Vset={(val) => handleUpdateSetpoints({ ch2Vset: val })}
+            {activeTab === 'SEQUENCE' && (
+              <SequenceBuilder
+                connected={connected}
+                outputState={telemetry.outputState}
+                hardwareMode={telemetry.mode}
+                isRunning={isSequenceRunning}
+                onRunSequence={handleRunSequence}
+                onStopSequence={handleStopSequence}
+                progress={sequenceProgress}
+                telemetryHistory={telemetryHistory}
+                maxVoltage={telemetry.maxVoltage}
+                maxCurrent={telemetry.maxCurrent}
               />
             )}
 
-            {telemetry.mode === 'PARALLEL' && (
-              <ParallelView
-                telemetry={telemetry}
-                onUpdateMasterVset={(val) => handleUpdateSetpoints({ masterVset: val })}
-                onUpdateCh1Iset={(val) => handleUpdateSetpoints({ ch1Iset: val })}
-                onUpdateCh2Iset={(val) => handleUpdateSetpoints({ ch2Iset: val })}
-              />
-            )}
-
-            {/* Live Telemetry Chart embedded inside Main Control HMI */}
-            <LiveChart telemetryHistory={telemetryHistory} />
-          </div>
-        )}
-
-        {activeTab === 'SEQUENCE' && (
-          <SequenceBuilder
-            connected={connected}
-            outputState={telemetry.outputState}
-            isRunning={isSequenceRunning}
-            onRunSequence={handleRunSequence}
-            onStopSequence={handleStopSequence}
-            progress={sequenceProgress}
-            telemetryHistory={telemetryHistory}
-            maxVoltage={telemetry.maxVoltage}
-            maxCurrent={telemetry.maxCurrent}
-          />
-        )}
-
-        {activeTab === 'HISTORY' && <HistoryView />}
-      </main>
+            {activeTab === 'HISTORY' && <HistoryView />}
+          </main>
+        </>
+      )}
 
       {/* Settings Modal */}
       <SettingsModal
@@ -400,3 +476,4 @@ export const App: React.FC = () => {
 };
 
 export default App;
+
