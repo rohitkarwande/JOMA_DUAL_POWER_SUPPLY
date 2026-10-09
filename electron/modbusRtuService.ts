@@ -249,19 +249,24 @@ export class ModbusRtuService {
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
 
-    return this.busLock.runExclusive(async () => {
-      if (!this.isConnected || this.sessionId !== currentSession) {
-        return false;
-      }
-      try {
-        // Coil START_STOP: Address 0X 1 (PDU Wire Address 0)
-        await this.client.writeCoil(0, enabled);
-        return true;
-      } catch (err) {
-        console.error('Failed to write START_STOP Coil:', err);
-        return false;
-      }
-    });
+    try {
+      return await this.busLock.runExclusive(async () => {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return false;
+        }
+        try {
+          // Coil START_STOP: Address 0X 1 (PDU Wire Address 0)
+          await this.client.writeCoil(0, enabled);
+          return true;
+        } catch (err) {
+          console.error('Failed to write START_STOP Coil:', err);
+          return false;
+        }
+      });
+    } catch (err: any) {
+      console.warn('[ModbusRtuService] setOutputState operation cancelled:', err?.message);
+      return false;
+    }
   }
 
   public async setSetpoints(params: {
@@ -300,42 +305,47 @@ export class ModbusRtuService {
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
 
-    return this.busLock.runExclusive(async () => {
-      if (!this.isConnected || this.sessionId !== currentSession) {
-        return false;
-      }
-      try {
-        // MainAddress Base-1 -> PDU Wire Address = MainAddress - 1
-        // V_SET_ID1: Reg 9 (PDU 8)
-        if (params.ch1Vset !== undefined) {
-          await this.writeFloat32(8, params.ch1Vset);
+    try {
+      return await this.busLock.runExclusive(async () => {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return false;
         }
-        // I_SET_ID1: Reg 11 (PDU 10)
-        if (params.ch1Iset !== undefined) {
-          await this.writeFloat32(10, params.ch1Iset);
+        try {
+          // MainAddress Base-1 -> PDU Wire Address = MainAddress - 1
+          // V_SET_ID1: Reg 9 (PDU 8)
+          if (params.ch1Vset !== undefined) {
+            await this.writeFloat32(8, params.ch1Vset);
+          }
+          // I_SET_ID1: Reg 11 (PDU 10)
+          if (params.ch1Iset !== undefined) {
+            await this.writeFloat32(10, params.ch1Iset);
+          }
+          // V_SET_ID2: Reg 13 (PDU 12)
+          if (params.ch2Vset !== undefined) {
+            await this.writeFloat32(12, params.ch2Vset);
+          }
+          // I_SET_ID2: Reg 15 (PDU 14)
+          if (params.ch2Iset !== undefined) {
+            await this.writeFloat32(14, params.ch2Iset);
+          }
+          // PAR_VOLT_SET: Reg 21 (PDU 20)
+          if (params.masterVset !== undefined) {
+            await this.writeFloat32(20, params.masterVset);
+          }
+          // SER_CUR_SET: Reg 27 (PDU 26)
+          if (params.masterIset !== undefined) {
+            await this.writeFloat32(26, params.masterIset);
+          }
+          return true;
+        } catch (err) {
+          console.error('Failed to write setpoints over Modbus:', err);
+          return false;
         }
-        // V_SET_ID2: Reg 13 (PDU 12)
-        if (params.ch2Vset !== undefined) {
-          await this.writeFloat32(12, params.ch2Vset);
-        }
-        // I_SET_ID2: Reg 15 (PDU 14)
-        if (params.ch2Iset !== undefined) {
-          await this.writeFloat32(14, params.ch2Iset);
-        }
-        // PAR_VOLT_SET: Reg 21 (PDU 20)
-        if (params.masterVset !== undefined) {
-          await this.writeFloat32(20, params.masterVset);
-        }
-        // SER_CUR_SET: Reg 27 (PDU 26)
-        if (params.masterIset !== undefined) {
-          await this.writeFloat32(26, params.masterIset);
-        }
-        return true;
-      } catch (err) {
-        console.error('Failed to write setpoints over Modbus:', err);
-        return false;
-      }
-    });
+      });
+    } catch (err: any) {
+      console.warn('[ModbusRtuService] setSetpoints operation cancelled:', err?.message);
+      return false;
+    }
   }
 
   public async setSingleSetpoints(params: { vSet?: number; iSet?: number }): Promise<boolean> {
@@ -356,25 +366,30 @@ export class ModbusRtuService {
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
 
-    return this.busLock.runExclusive(async () => {
-      if (!this.isConnected || this.sessionId !== currentSession) {
-        return false;
-      }
-      try {
-        // Base-1 Reg 4X 1 -> PDU Wire Address 0 (Float32 LE)
-        if (params.vSet !== undefined) {
-          await this.writeFloat32(0, params.vSet);
+    try {
+      return await this.busLock.runExclusive(async () => {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return false;
         }
-        // Base-1 Reg 4X 3 -> PDU Wire Address 2 (Float32 LE)
-        if (params.iSet !== undefined) {
-          await this.writeFloat32(2, params.iSet);
+        try {
+          // Base-1 Reg 4X 1 -> PDU Wire Address 0 (Float32 LE)
+          if (params.vSet !== undefined) {
+            await this.writeFloat32(0, params.vSet);
+          }
+          // Base-1 Reg 4X 3 -> PDU Wire Address 2 (Float32 LE)
+          if (params.iSet !== undefined) {
+            await this.writeFloat32(2, params.iSet);
+          }
+          return true;
+        } catch (err) {
+          console.error('Failed to write Single PS setpoints over Modbus:', err);
+          return false;
         }
-        return true;
-      } catch (err) {
-        console.error('Failed to write Single PS setpoints over Modbus:', err);
-        return false;
-      }
-    });
+      });
+    } catch (err: any) {
+      console.warn('[ModbusRtuService] setSingleSetpoints operation cancelled:', err?.message);
+      return false;
+    }
   }
 
   private startPolling() {
@@ -656,52 +671,57 @@ export class ModbusRtuService {
     if (mode === 'PARALLEL') modeCode = 12;
     else if (mode === 'SERIES') modeCode = 13;
 
-    return this.busLock.runExclusive(async () => {
-      if (!this.isConnected || this.sessionId !== currentSession) {
-        return { success: false, error: 'Connection session changed' };
-      }
-
-      try {
-        console.log(`[Sequence Startup] Requested Mode: ${mode}`);
-        console.log(`[Sequence Startup] Mode Write: ${modeCode} to Reg 4X 29 (PDU 28)`);
-
-        // Holding Register 4X 29 -> PDU Wire Address 28
-        await this.client.writeRegister(28, modeCode);
-
-        // Small delay before readback
-        await new Promise((r) => setTimeout(r, 50));
-
-        // Readback Register 4X 29
-        const res = await this.client.readHoldingRegisters(28, 1);
-        let readbackCode = 11;
-        if (res && res.data && res.data.length > 0) {
-          readbackCode = res.data[0];
+    try {
+      return await this.busLock.runExclusive(async () => {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return { success: false, error: 'Connection session changed' };
         }
 
-        let readbackMode: OperatingMode = 'ISOLATED';
-        if (readbackCode === 12) readbackMode = 'PARALLEL';
-        else if (readbackCode === 13) readbackMode = 'SERIES';
+        try {
+          console.log(`[Sequence Startup] Requested Mode: ${mode}`);
+          console.log(`[Sequence Startup] Mode Write: ${modeCode} to Reg 4X 29 (PDU 28)`);
 
-        console.log(`[Sequence Startup] Mode Readback: ${readbackCode} (${readbackMode})`);
-        const isVerified = readbackMode === mode;
-        console.log(`[Sequence Startup] Mode Verification: ${isVerified ? 'PASS' : 'FAIL'}`);
+          // Holding Register 4X 29 -> PDU Wire Address 28
+          await this.client.writeRegister(28, modeCode);
 
-        if (!isVerified) {
-          return {
-            success: false,
-            readbackMode,
-            error: `Hardware mode verification failed: Requested ${mode}, hardware returned ${readbackMode} (code ${readbackCode})`,
-          };
+          // Small delay before readback
+          await new Promise((r) => setTimeout(r, 50));
+
+          // Readback Register 4X 29
+          const res = await this.client.readHoldingRegisters(28, 1);
+          let readbackCode = 11;
+          if (res && res.data && res.data.length > 0) {
+            readbackCode = res.data[0];
+          }
+
+          let readbackMode: OperatingMode = 'ISOLATED';
+          if (readbackCode === 12) readbackMode = 'PARALLEL';
+          else if (readbackCode === 13) readbackMode = 'SERIES';
+
+          console.log(`[Sequence Startup] Mode Readback: ${readbackCode} (${readbackMode})`);
+          const isVerified = readbackMode === mode;
+          console.log(`[Sequence Startup] Mode Verification: ${isVerified ? 'PASS' : 'FAIL'}`);
+
+          if (!isVerified) {
+            return {
+              success: false,
+              readbackMode,
+              error: `Hardware mode verification failed: Requested ${mode}, hardware returned ${readbackMode} (code ${readbackCode})`,
+            };
+          }
+
+          this.activeMode = readbackMode;
+          this.lastTelemetry.mode = readbackMode;
+          return { success: true, readbackMode };
+        } catch (err: any) {
+          console.error('[Sequence Startup] Mode write error:', err);
+          return { success: false, error: err?.message || 'Failed to write hardware mode' };
         }
-
-        this.activeMode = readbackMode;
-        this.lastTelemetry.mode = readbackMode;
-        return { success: true, readbackMode };
-      } catch (err: any) {
-        console.error('[Sequence Startup] Mode write error:', err);
-        return { success: false, error: err?.message || 'Failed to write hardware mode' };
-      }
-    });
+      });
+    } catch (err: any) {
+      console.warn('[ModbusRtuService] writeHardwareMode operation cancelled:', err?.message);
+      return { success: false, error: err?.message || 'Operation cancelled' };
+    }
   }
 
   public async writeOutputStateConfirmed(enabled: boolean): Promise<{ success: boolean; confirmedState?: boolean; error?: string }> {
@@ -711,48 +731,53 @@ export class ModbusRtuService {
 
     const currentSession = this.sessionId;
 
-    return this.busLock.runExclusive(async () => {
-      if (!this.isConnected || this.sessionId !== currentSession) {
-        return { success: false, error: 'Connection session changed' };
-      }
-
-      try {
-        console.log(`[Sequence Startup] Output ${enabled ? 'ON' : 'OFF'} command`);
-
-        // Coil START_STOP: Address 0X 1 (PDU Wire Address 0)
-        await this.client.writeCoil(0, enabled);
-
-        // Small delay before readback
-        await new Promise((r) => setTimeout(r, 30));
-
-        // Read back Coil 0
-        const coilRes = await this.client.readCoils(0, 1);
-        let confirmedState = enabled;
-        if (coilRes && coilRes.data && coilRes.data.length > 0) {
-          confirmedState = Boolean(coilRes.data[0]);
+    try {
+      return await this.busLock.runExclusive(async () => {
+        if (!this.isConnected || this.sessionId !== currentSession) {
+          return { success: false, error: 'Connection session changed' };
         }
 
-        console.log(`[Sequence Startup] Output Readback: ${confirmedState ? 'ON' : 'OFF'}`);
-        const isVerified = confirmedState === enabled;
-        console.log(`[Sequence Startup] Output Verification: ${isVerified ? 'PASS' : 'FAIL'}`);
+        try {
+          console.log(`[Sequence Startup] Output ${enabled ? 'ON' : 'OFF'} command`);
 
-        this.isOutputEnabled = confirmedState;
-        this.lastTelemetry.outputState = confirmedState ? 'ON' : 'OFF';
+          // Coil START_STOP: Address 0X 1 (PDU Wire Address 0)
+          await this.client.writeCoil(0, enabled);
 
-        if (!isVerified) {
-          return {
-            success: false,
-            confirmedState,
-            error: `Output state verification failed: Requested ${enabled ? 'ON' : 'OFF'}, hardware reported ${confirmedState ? 'ON' : 'OFF'}`,
-          };
+          // Small delay before readback
+          await new Promise((r) => setTimeout(r, 30));
+
+          // Read back Coil 0
+          const coilRes = await this.client.readCoils(0, 1);
+          let confirmedState = enabled;
+          if (coilRes && coilRes.data && coilRes.data.length > 0) {
+            confirmedState = Boolean(coilRes.data[0]);
+          }
+
+          console.log(`[Sequence Startup] Output Readback: ${confirmedState ? 'ON' : 'OFF'}`);
+          const isVerified = confirmedState === enabled;
+          console.log(`[Sequence Startup] Output Verification: ${isVerified ? 'PASS' : 'FAIL'}`);
+
+          this.isOutputEnabled = confirmedState;
+          this.lastTelemetry.outputState = confirmedState ? 'ON' : 'OFF';
+
+          if (!isVerified) {
+            return {
+              success: false,
+              confirmedState,
+              error: `Output state verification failed: Requested ${enabled ? 'ON' : 'OFF'}, hardware reported ${confirmedState ? 'ON' : 'OFF'}`,
+            };
+          }
+
+          return { success: true, confirmedState };
+        } catch (err: any) {
+          console.error('[Sequence Startup] Output write error:', err);
+          return { success: false, error: err?.message || 'Failed to write output state' };
         }
-
-        return { success: true, confirmedState };
-      } catch (err: any) {
-        console.error('[Sequence Startup] Output write error:', err);
-        return { success: false, error: err?.message || 'Failed to write output state' };
-      }
-    });
+      });
+    } catch (err: any) {
+      console.warn('[ModbusRtuService] writeOutputStateConfirmed operation cancelled:', err?.message);
+      return { success: false, error: err?.message || 'Operation cancelled' };
+    }
   }
 
   public getSequenceProgress(): SequenceProgress {
