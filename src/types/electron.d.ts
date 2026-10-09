@@ -1,10 +1,14 @@
-import { DualPSTelemetry, SinglePSTelemetry, AppMode, OperatingMode, SerialSettings, SequenceRecipe, TestSessionRecord } from './powerSupply';
+import { DualPSTelemetry, SinglePSTelemetry, AppMode, OperatingMode, SerialSettings, SequenceRecipe, TestSessionRecord, SystemLogEntry } from './powerSupply';
 
 export interface ElectronAPI {
   // Connection & Serial Management
   getSerialPorts: () => Promise<string[]>;
   connectSerial: (settings: SerialSettings) => Promise<{ success: boolean; error?: string }>;
   disconnectSerial: () => Promise<boolean>;
+
+  // System & Modbus Logs
+  getRecentLogs: () => Promise<SystemLogEntry[]>;
+  clearLogs: () => Promise<boolean>;
 
   // Power Supply Commands & Application Mode
   setAppMode: (mode: AppMode) => Promise<{ success: boolean; error?: string }>;
@@ -31,8 +35,9 @@ export interface ElectronAPI {
   // Streaming Telemetry & Event Listeners
   onTelemetry: (callback: (telemetry: DualPSTelemetry) => void) => () => void;
   onSingleTelemetry: (callback: (telemetry: SinglePSTelemetry) => void) => () => void;
-  onStatusChange: (callback: (status: { connected: boolean; port?: string; error?: string }) => void) => () => void;
+  onStatusChange: (callback: (status: { connected: boolean; port?: string; error?: string; isSimulator?: boolean }) => void) => () => void;
   onSequenceProgress: (callback: (progress: any) => void) => () => void;
+  onSystemLog: (callback: (log: SystemLogEntry) => void) => () => void;
 
   // Database API
   db: {
@@ -42,6 +47,21 @@ export interface ElectronAPI {
     getRecipes: () => Promise<SequenceRecipe[]>;
     saveRecipe: (recipe: Omit<SequenceRecipe, 'id'>) => Promise<string>;
     deleteRecipe: (recipeId: string) => Promise<boolean>;
+  };
+
+  // Reports API
+  reports: {
+    savePdf: (params: { fileName: string; dataBase64: string; metadata: any }) => Promise<{ success: boolean; filePath?: string; record?: any; error?: string }>;
+    getReports: () => Promise<any[]>;
+    openPdf: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+    showInFolder: (filePath: string) => Promise<{ success: boolean; error?: string }>;
+    deleteReport: (id: string) => Promise<boolean>;
+  };
+
+  // Settings API
+  settings: {
+    get: (key: string) => Promise<string | undefined>;
+    set: (key: string, value: string) => Promise<boolean>;
   };
 }
 

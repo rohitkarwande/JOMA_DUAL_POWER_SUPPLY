@@ -1,7 +1,8 @@
 import React, { useState } from 'react';
-import { Power, Zap, Activity, AlertTriangle, ShieldCheck, RefreshCw } from 'lucide-react';
-import { SinglePSTelemetry, OutputState } from '../types/powerSupply';
+import { Power, Zap, Activity, AlertTriangle } from 'lucide-react';
+import { SinglePSTelemetry } from '../types/powerSupply';
 import { LiveChart } from './LiveChart';
+import { formatVoltage, formatCurrent } from '../utils/formatters';
 
 interface SinglePowerSupplyViewProps {
   telemetry: SinglePSTelemetry;
@@ -129,13 +130,13 @@ export const SinglePowerSupplyView: React.FC<SinglePowerSupplyViewProps> = ({
             </div>
             <div className="py-4 text-right">
               <span className="font-mono text-5xl md:text-6xl font-black text-cyan-400 tracking-tight drop-shadow-[0_0_15px_rgba(34,211,238,0.4)]">
-                {telemetry.vMon.toFixed(3)}
+                {formatVoltage(telemetry.vMon)}
               </span>
               <span className="text-xl font-extrabold text-cyan-600 font-mono ml-2">V</span>
             </div>
             <div className="text-xs font-semibold text-slate-500 flex justify-between pt-1 border-t border-slate-800/80">
               <span>Actual Output Readout</span>
-              <span>Resolution: 0.001 V</span>
+              <span>Resolution: {Math.abs(telemetry.vMon) < 30 ? '0.001' : Math.abs(telemetry.vMon) < 60 ? '0.01' : '0.1'} V</span>
             </div>
           </div>
 
@@ -149,13 +150,13 @@ export const SinglePowerSupplyView: React.FC<SinglePowerSupplyViewProps> = ({
             </div>
             <div className="py-4 text-right">
               <span className="font-mono text-5xl md:text-6xl font-black text-emerald-400 tracking-tight drop-shadow-[0_0_15px_rgba(52,211,153,0.4)]">
-                {telemetry.iMon.toFixed(4)}
+                {formatCurrent(telemetry.iMon)}
               </span>
               <span className="text-xl font-extrabold text-emerald-600 font-mono ml-2">A</span>
             </div>
             <div className="text-xs font-semibold text-slate-500 flex justify-between pt-1 border-t border-slate-800/80">
               <span>Actual Output Readout</span>
-              <span>Resolution: 0.0001 A</span>
+              <span>Resolution: {Math.abs(telemetry.iMon) < 30 ? '0.001' : Math.abs(telemetry.iMon) < 60 ? '0.01' : '0.1'} A</span>
             </div>
           </div>
         </div>
@@ -354,7 +355,7 @@ export const SinglePowerSupplyView: React.FC<SinglePowerSupplyViewProps> = ({
           </h3>
           <span className="text-xs font-semibold text-slate-400">Plotting Vmon (V) & Imon (A)</span>
         </div>
-        <LiveChart telemetryHistory={telemetryHistory} />
+        <LiveChart telemetryHistory={telemetryHistory} maxVoltage={maxVoltage} maxCurrent={maxCurrent} />
       </div>
     </div>
   );

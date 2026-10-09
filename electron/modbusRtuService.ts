@@ -1,6 +1,6 @@
 import ModbusRTU from 'modbus-serial';
 import { BrowserWindow } from 'electron';
-import { SerialSettings, OperatingMode, AppMode, DualPSTelemetry, SinglePSTelemetry, SequenceStep } from '../src/types/powerSupply';
+import { SerialSettings, OperatingMode, AppMode, DualPSTelemetry, SinglePSTelemetry, SequenceStep, SystemLogEntry } from '../src/types/powerSupply';
 
 export interface SequenceProgress {
   status: 'IDLE' | 'INITIALIZING' | 'RUNNING' | 'PAUSED' | 'STOPPED' | 'ERROR' | 'COMPLETED';
@@ -88,6 +88,15 @@ export class ModbusRtuService {
   private pollingTimer: NodeJS.Timeout | null = null;
   private consecutiveErrors = 0;
   private windowGetter: () => BrowserWindow | null;
+  private logs: SystemLogEntry[] = [];
+  private simulatedState = {
+    ch1V: 0,
+    ch1I: 0,
+    ch2V: 0,
+    ch2I: 0,
+    singleV: 0,
+    singleI: 0,
+  };
 
   // Session & Polling Queue Guards
   private sessionId = 0;
@@ -109,6 +118,8 @@ export class ModbusRtuService {
     timestamp: Date.now(),
     mode: 'ISOLATED',
     outputState: 'OFF',
+    maxVoltage: 60.0,
+    maxCurrent: 10.0,
     ch1: { voltageActual: 0, currentActual: 0, voltageSetpoint: 0, currentSetpoint: 0, powerActual: 0, outputEnabled: false },
     ch2: { voltageActual: 0, currentActual: 0, voltageSetpoint: 0, currentSetpoint: 0, powerActual: 0, outputEnabled: false },
     totalVoltage: 0,
@@ -150,24 +161,50 @@ export class ModbusRtuService {
   public async getAvailablePorts(): Promise<string[]> {
     try {
       const ports = await ModbusRTU.getPorts();
+      this.log('info', 'SERIAL', `Scanned COM ports: found ${ports.length} port(s) [${ports.map((p) => p.path).join(', ')}]`);
       return ports.map((p) => p.path);
-    } catch (err) {
-      console.error('Error listing serial ports:', err);
+    } catch (err: any) {
+      this.log('error', 'SERIAL', `Error listing serial ports: ${err?.message}`);
       return [];
     }
   }
 
   public async connect(settings: SerialSettings): Promise<{ success: boolean; error?: string }> {
     this.settings = { ...settings };
+    this.log('info', 'SERIAL', `Initiating connection request: ${this.settings.isSimulator ? 'VIRTUAL SIMULATOR' : this.settings.port}`, {
+      port: this.settings.port,
+      baudRate: this.settings.baudRate,
+      slaveId: this.settings.slaveId,
+      parity: this.settings.parity,
+      stopBits: this.settings.stopBits,
+      isSimulator: this.settings.isSimulator,
+      appMode: this.appMode,
+    });
+
     try {
-      if (this.isConnected) {
+      if (this.isConnected || (this.client && this.client.isOpen)) {
+        this.log('info', 'SERIAL', 'Releasing existing connection before reopening port...');
         await this.disconnect();
+        // Give Windows COM port driver 250ms to release file handle
+        await new Promise((resolve) => setTimeout(resolve, 250));
       }
 
       // Invalidate old session ID & clear queued tasks from previous session with promise rejection
       this.sessionId++;
       this.busLock.clearQueue('OPERATION_CANCELLED_SERIAL_RECONNECTED');
       this.isPollInFlight = false;
+
+      if (this.settings.isSimulator) {
+        this.isConnected = true;
+        this.consecutiveErrors = 0;
+        this.log('success', 'SIMULATOR', 'Virtual Simulator connected successfully. Emulating dual/single channel power supply hardware.');
+        this.notifyStatus(true);
+        await this.pollTelemetry();
+        this.startPolling();
+        return { success: true };
+      }
+
+      this.log('info', 'SERIAL', `Opening serial port ${this.settings.port} at ${this.settings.baudRate} baud (8-${this.settings.parity[0]?.toUpperCase() || 'N'}-${this.settings.stopBits}, Slave ID: ${this.settings.slaveId})...`);
 
       await this.client.connectRTUBuffered(this.settings.port, {
         baudRate: this.settings.baudRate,
@@ -177,23 +214,32 @@ export class ModbusRtuService {
       });
 
       this.client.setID(this.settings.slaveId);
-      this.client.setTimeout(1000);
+      this.client.setTimeout(1500); // 1.5s timeout for hardware response
       this.isConnected = true;
       this.consecutiveErrors = 0;
 
+      this.log('success', 'SERIAL', `Serial port ${this.settings.port} opened successfully!`);
       this.notifyStatus(true);
+
+      this.log('info', 'MODBUS', `Sending initial telemetry query to Slave ID ${this.settings.slaveId} on ${this.settings.port}...`);
       await this.pollTelemetry();
       this.startPolling();
 
       return { success: true };
     } catch (err: any) {
       this.isConnected = false;
-      this.notifyStatus(false, err?.message || 'Failed to open serial port');
-      return { success: false, error: err?.message || 'Connection failed' };
+      const errorMsg = err?.message || 'Failed to open serial port';
+      this.log('error', 'SERIAL', `Failed to connect on ${this.settings.port}: ${errorMsg}`, {
+        code: err?.code,
+        errno: err?.errno,
+      });
+      this.notifyStatus(false, errorMsg);
+      return { success: false, error: errorMsg };
     }
   }
 
   public async disconnect(): Promise<boolean> {
+    this.log('info', 'SERIAL', `Disconnecting from ${this.settings.isSimulator ? 'Simulator' : this.settings.port}...`);
     this.stopPolling();
     this.stopSequence();
     this.sessionId++;
@@ -201,10 +247,15 @@ export class ModbusRtuService {
     this.isPollInFlight = false;
     this.isConnected = false;
     try {
-      if (this.client.isOpen) {
-        await this.client.close(() => {});
+      if (this.client && this.client.isOpen) {
+        await new Promise<void>((resolve) => {
+          this.client.close(() => resolve());
+        });
+        this.log('info', 'SERIAL', `Serial port ${this.settings.port} closed.`);
       }
-    } catch (_) {}
+    } catch (err: any) {
+      this.log('warn', 'SERIAL', `Notice while closing serial port: ${err?.message}`);
+    }
     this.notifyStatus(false);
     return true;
   }
@@ -246,6 +297,13 @@ export class ModbusRtuService {
     this.lastTelemetry.ch2.outputEnabled = enabled;
     this.lastSingleTelemetry.outputState = enabled ? 'ON' : 'OFF';
 
+    if (this.settings.isSimulator) {
+      this.log('info', 'SIMULATOR', `Output switched to ${enabled ? 'ON' : 'OFF'}`);
+      this.emitTelemetry(this.lastTelemetry);
+      this.emitSingleTelemetry(this.lastSingleTelemetry);
+      return true;
+    }
+
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
 
@@ -255,16 +313,20 @@ export class ModbusRtuService {
           return false;
         }
         try {
+          this.log('info', 'MODBUS', `Writing Coil 0 (START_STOP) = ${enabled}`);
           // Coil START_STOP: Address 0X 1 (PDU Wire Address 0)
           await this.client.writeCoil(0, enabled);
+          this.log('success', 'MODBUS', `START_STOP Coil set to ${enabled ? 'ON (1)' : 'OFF (0)'}`);
+          this.emitTelemetry(this.lastTelemetry);
+          this.emitSingleTelemetry(this.lastSingleTelemetry);
           return true;
-        } catch (err) {
-          console.error('Failed to write START_STOP Coil:', err);
+        } catch (err: any) {
+          this.log('error', 'MODBUS', `Failed to write START_STOP Coil: ${err?.message}`);
           return false;
         }
       });
     } catch (err: any) {
-      console.warn('[ModbusRtuService] setOutputState operation cancelled:', err?.message);
+      this.log('warn', 'MODBUS', `setOutputState operation cancelled: ${err?.message}`);
       return false;
     }
   }
@@ -291,7 +353,7 @@ export class ModbusRtuService {
       isInvalid(params.ch2Iset, iMax) ||
       isInvalid(params.masterIset, iMax)
     ) {
-      console.error(`[Safety Interlock] Setpoint write rejected: Invalid numerical value or exceeds V_max (${vMax}V) / I_max (${iMax}A)`);
+      this.log('error', 'SYSTEM', `Setpoint write rejected: Invalid value or exceeds V_max (${vMax}V) / I_max (${iMax}A)`);
       return false;
     }
 
@@ -302,6 +364,11 @@ export class ModbusRtuService {
     if (params.masterVset !== undefined) this.lastTelemetry.masterVoltageSetpoint = params.masterVset;
     if (params.masterIset !== undefined) this.lastTelemetry.masterCurrentSetpoint = params.masterIset;
 
+    if (this.settings.isSimulator) {
+      this.log('info', 'SIMULATOR', `Setpoints updated: ${JSON.stringify(params)}`);
+      return true;
+    }
+
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
 
@@ -311,39 +378,23 @@ export class ModbusRtuService {
           return false;
         }
         try {
+          this.log('info', 'MODBUS', `Writing Dual PS setpoints: ${JSON.stringify(params)}`);
           // MainAddress Base-1 -> PDU Wire Address = MainAddress - 1
-          // V_SET_ID1: Reg 9 (PDU 8)
-          if (params.ch1Vset !== undefined) {
-            await this.writeFloat32(8, params.ch1Vset);
-          }
-          // I_SET_ID1: Reg 11 (PDU 10)
-          if (params.ch1Iset !== undefined) {
-            await this.writeFloat32(10, params.ch1Iset);
-          }
-          // V_SET_ID2: Reg 13 (PDU 12)
-          if (params.ch2Vset !== undefined) {
-            await this.writeFloat32(12, params.ch2Vset);
-          }
-          // I_SET_ID2: Reg 15 (PDU 14)
-          if (params.ch2Iset !== undefined) {
-            await this.writeFloat32(14, params.ch2Iset);
-          }
-          // PAR_VOLT_SET: Reg 21 (PDU 20)
-          if (params.masterVset !== undefined) {
-            await this.writeFloat32(20, params.masterVset);
-          }
-          // SER_CUR_SET: Reg 27 (PDU 26)
-          if (params.masterIset !== undefined) {
-            await this.writeFloat32(26, params.masterIset);
-          }
+          if (params.ch1Vset !== undefined) await this.writeFloat32CDAB(8, params.ch1Vset);
+          if (params.ch1Iset !== undefined) await this.writeFloat32CDAB(10, params.ch1Iset);
+          if (params.ch2Vset !== undefined) await this.writeFloat32CDAB(12, params.ch2Vset);
+          if (params.ch2Iset !== undefined) await this.writeFloat32CDAB(14, params.ch2Iset);
+          if (params.masterVset !== undefined) await this.writeFloat32CDAB(20, params.masterVset);
+          if (params.masterIset !== undefined) await this.writeFloat32CDAB(26, params.masterIset);
+          this.log('success', 'MODBUS', 'Setpoints written successfully.');
           return true;
-        } catch (err) {
-          console.error('Failed to write setpoints over Modbus:', err);
+        } catch (err: any) {
+          this.log('error', 'MODBUS', `Failed to write setpoints over Modbus: ${err?.message}`);
           return false;
         }
       });
     } catch (err: any) {
-      console.warn('[ModbusRtuService] setSetpoints operation cancelled:', err?.message);
+      this.log('warn', 'MODBUS', `setSetpoints operation cancelled: ${err?.message}`);
       return false;
     }
   }
@@ -356,12 +407,17 @@ export class ModbusRtuService {
       val !== undefined && (isNaN(val) || !isFinite(val) || val < 0 || (max !== undefined && val > max));
 
     if (isInvalid(params.vSet, vMax) || isInvalid(params.iSet, iMax)) {
-      console.error(`[Safety Interlock] Single PS Setpoint write rejected: Invalid numerical value or exceeds V_max (${vMax}V) / I_max (${iMax}A)`);
+      this.log('error', 'SYSTEM', `Single PS Setpoint write rejected: Invalid value or exceeds V_max (${vMax}V) / I_max (${iMax}A)`);
       return false;
     }
 
     if (params.vSet !== undefined) this.lastSingleTelemetry.vSet = params.vSet;
     if (params.iSet !== undefined) this.lastSingleTelemetry.iSet = params.iSet;
+
+    if (this.settings.isSimulator) {
+      this.log('info', 'SIMULATOR', `Single PS setpoints updated: ${JSON.stringify(params)}`);
+      return true;
+    }
 
     if (!this.isConnected) return true;
     const currentSession = this.sessionId;
@@ -372,22 +428,20 @@ export class ModbusRtuService {
           return false;
         }
         try {
-          // Base-1 Reg 4X 1 -> PDU Wire Address 0 (Float32 LE)
-          if (params.vSet !== undefined) {
-            await this.writeFloat32(0, params.vSet);
-          }
-          // Base-1 Reg 4X 3 -> PDU Wire Address 2 (Float32 LE)
-          if (params.iSet !== undefined) {
-            await this.writeFloat32(2, params.iSet);
-          }
+          this.log('info', 'MODBUS', `Writing Single PS setpoints: ${JSON.stringify(params)}`);
+          // Base-1 Reg 4X 1 -> PDU Wire Address 0 (Float32 CDAB)
+          if (params.vSet !== undefined) await this.writeFloat32CDAB(0, params.vSet);
+          // Base-1 Reg 4X 3 -> PDU Wire Address 2 (Float32 CDAB)
+          if (params.iSet !== undefined) await this.writeFloat32CDAB(2, params.iSet);
+          this.log('success', 'MODBUS', 'Single PS setpoints written successfully.');
           return true;
-        } catch (err) {
-          console.error('Failed to write Single PS setpoints over Modbus:', err);
+        } catch (err: any) {
+          this.log('error', 'MODBUS', `Failed to write Single PS setpoints over Modbus: ${err?.message}`);
           return false;
         }
       });
     } catch (err: any) {
-      console.warn('[ModbusRtuService] setSingleSetpoints operation cancelled:', err?.message);
+      this.log('warn', 'MODBUS', `setSingleSetpoints operation cancelled: ${err?.message}`);
       return false;
     }
   }
@@ -412,6 +466,12 @@ export class ModbusRtuService {
     this.isPollInFlight = true;
     const currentSession = this.sessionId;
 
+    if (this.settings.isSimulator) {
+      this.simulateTelemetry();
+      this.isPollInFlight = false;
+      return;
+    }
+
     if (this.appMode === 'SINGLE_PS') {
       await this.pollSingleTelemetry(currentSession);
       return;
@@ -428,7 +488,11 @@ export class ModbusRtuService {
           if (coilRes && coilRes.data && coilRes.data.length > 0) {
             this.isOutputEnabled = Boolean(coilRes.data[0]);
           }
-        } catch (_) {}
+        } catch (coilErr: any) {
+          if (this.consecutiveErrors === 0) {
+            this.log('warn', 'MODBUS', `Read Coil 0 (START_STOP) returned: ${coilErr?.message}. Hardware may only support Holding Registers.`);
+          }
+        }
 
         if (!this.isConnected || this.sessionId !== currentSession) {
           return;
@@ -442,22 +506,22 @@ export class ModbusRtuService {
 
         const buf = res.buffer;
 
-        const ch1Vmon = buf.readFloatLE(0);
-        const ch1Imon = buf.readFloatLE(4);
-        const ch2Vmon = buf.readFloatLE(8);
-        const ch2Imon = buf.readFloatLE(12);
+        const ch1Vmon = this.readFloat32CDAB(buf, 0);
+        const ch1Imon = this.readFloat32CDAB(buf, 4);
+        const ch2Vmon = this.readFloat32CDAB(buf, 8);
+        const ch2Imon = this.readFloat32CDAB(buf, 12);
 
-        const ch1Vset = buf.readFloatLE(16);
-        const ch1Iset = buf.readFloatLE(20);
-        const ch2Vset = buf.readFloatLE(24);
-        const ch2Iset = buf.readFloatLE(28);
+        const ch1Vset = this.readFloat32CDAB(buf, 16);
+        const ch1Iset = this.readFloat32CDAB(buf, 20);
+        const ch2Vset = this.readFloat32CDAB(buf, 24);
+        const ch2Iset = this.readFloat32CDAB(buf, 28);
 
-        const parVoltMon = buf.readFloatLE(32);
-        const parCurMon = buf.readFloatLE(36);
-        const parVoltSet = buf.readFloatLE(40);
-        const serVoltMon = buf.readFloatLE(44);
-        const serCurMon = buf.readFloatLE(48);
-        const serCurSet = buf.readFloatLE(52);
+        const parVoltMon = this.readFloat32CDAB(buf, 32);
+        const parCurMon = this.readFloat32CDAB(buf, 36);
+        const parVoltSet = this.readFloat32CDAB(buf, 40);
+        const serVoltMon = this.readFloat32CDAB(buf, 44);
+        const serCurMon = this.readFloat32CDAB(buf, 48);
+        const serCurSet = this.readFloat32CDAB(buf, 52);
 
         // POP_WINDOW INT at Reg 29 (PDU offset 28 -> byte offset 56)
         const modeCode = buf.readUInt16BE(56);
@@ -484,8 +548,8 @@ export class ModbusRtuService {
         let vMax = 60.0;
         let iMax = 10.0;
         if (buf.length >= 66) {
-          const parsedVmax = buf.readFloatLE(58);
-          const parsedImax = buf.readFloatLE(62);
+          const parsedVmax = this.readFloat32CDAB(buf, 58);
+          const parsedImax = this.readFloat32CDAB(buf, 62);
           if (!isNaN(parsedVmax) && parsedVmax > 0) vMax = Number(parsedVmax.toFixed(3));
           if (!isNaN(parsedImax) && parsedImax > 0) iMax = Number(parsedImax.toFixed(4));
         }
@@ -527,18 +591,25 @@ export class ModbusRtuService {
           isStale: false,
         };
 
+        if (this.consecutiveErrors > 0) {
+          this.log('success', 'MODBUS', `Communication established with Slave ID ${this.settings.slaveId} on ${this.settings.port}.`);
+        }
         this.consecutiveErrors = 0;
         this.emitTelemetry(this.lastTelemetry);
-      } catch (err) {
+      } catch (err: any) {
         if (!this.isConnected || this.sessionId !== currentSession) {
           return;
         }
         this.consecutiveErrors++;
+        const errDetail = err?.message || String(err);
+        this.log('error', 'MODBUS', `[Dual PS] Read Holding Registers (0..33) failed on ${this.settings.port} (Slave ID: ${this.settings.slaveId}) [Error #${this.consecutiveErrors}/3]: ${errDetail}`);
         if (this.consecutiveErrors >= 3) {
           this.lastTelemetry.alarms.commFault = true;
           this.lastTelemetry.isStale = true;
           this.emitTelemetry(this.lastTelemetry);
-          this.notifyStatus(false, 'Communication timeout / hardware error');
+          const disconnectReason = `Hardware timeout: No response on ${this.settings.port} (Slave ID: ${this.settings.slaveId}). Error: ${errDetail}`;
+          this.log('error', 'MODBUS', `CRITICAL: 3 consecutive poll failures. Marking DISCONNECTED. Diagnostics: 1) Verify Baud Rate matches hardware, 2) Verify Slave ID (current: ${this.settings.slaveId}), 3) Check RS485 A/B lines.`);
+          this.notifyStatus(false, disconnectReason);
         }
       } finally {
         this.isPollInFlight = false;
@@ -576,16 +647,33 @@ export class ModbusRtuService {
         }
 
         const buf = res.buffer;
-        const vSet = buf.readFloatLE(0);
-        const iSet = buf.readFloatLE(4);
-        const vMon = buf.readFloatLE(8);
-        const iMon = buf.readFloatLE(12);
+        const vSet = this.readFloat32CDAB(buf, 0);
+        const iSet = this.readFloat32CDAB(buf, 4);
+        const vMon = this.readFloat32CDAB(buf, 8);
+        const iMon = this.readFloat32CDAB(buf, 12);
 
-        const vMonVal = !isNaN(vMon) ? Math.max(0, Number(vMon.toFixed(3))) : 0;
-        const iMonVal = !isNaN(iMon) ? Math.max(0, Number(iMon.toFixed(4))) : 0;
-        const vSetVal = !isNaN(vSet) && vSet >= 0 ? Number(vSet.toFixed(3)) : this.lastSingleTelemetry.vSet;
-        const iSetVal = !isNaN(iSet) && iSet >= 0 ? Number(iSet.toFixed(4)) : this.lastSingleTelemetry.iSet;
-        const powerVal = Number((vMonVal * iMonVal).toFixed(2));
+        // Validate decoded telemetry. Reject non-finite (NaN, +/-Infinity) or implausible values
+        // rather than clamping or silently presenting corrupted data as zero.
+        const isTelemetryFinite = isFinite(vSet) && isFinite(iSet) && isFinite(vMon) && isFinite(iMon);
+        const isPlausible =
+          vSet >= 0 && vSet <= 500 &&
+          iSet >= 0 && iSet <= 100 &&
+          vMon >= -0.5 && vMon <= 500 &&
+          iMon >= -0.5 && iMon <= 100;
+
+        if (!isTelemetryFinite || !isPlausible) {
+          this.log('warn', 'MODBUS', `[Single PS] Implausible or corrupted telemetry received: V_SET=${vSet}, I_SET=${iSet}, V_MON=${vMon}, I_MON=${iMon}`);
+          this.lastSingleTelemetry.alarms.commFault = true;
+          this.lastSingleTelemetry.isStale = true;
+          this.emitSingleTelemetry(this.lastSingleTelemetry);
+          return;
+        }
+
+        const vMonVal = Number(vMon.toFixed(3));
+        const iMonVal = Number(iMon.toFixed(4));
+        const vSetVal = Number(vSet.toFixed(3));
+        const iSetVal = Number(iSet.toFixed(4));
+        const powerVal = Number((Math.max(0, vMonVal) * Math.max(0, iMonVal)).toFixed(2));
 
         this.lastSingleTelemetry = {
           timestamp: Date.now(),
@@ -604,18 +692,25 @@ export class ModbusRtuService {
           maxCurrent: 10.0,
         };
 
+        if (this.consecutiveErrors > 0) {
+          this.log('success', 'MODBUS', `[Single PS] Communication established with Slave ID ${this.settings.slaveId} on ${this.settings.port}.`);
+        }
         this.consecutiveErrors = 0;
         this.emitSingleTelemetry(this.lastSingleTelemetry);
-      } catch (err) {
+      } catch (err: any) {
         if (!this.isConnected || this.sessionId !== currentSession) {
           return;
         }
         this.consecutiveErrors++;
+        const errDetail = err?.message || String(err);
+        this.log('error', 'MODBUS', `[Single PS] Read Holding Registers (0..7) failed on ${this.settings.port} (Slave ID: ${this.settings.slaveId}) [Error #${this.consecutiveErrors}/3]: ${errDetail}`);
         if (this.consecutiveErrors >= 3) {
           this.lastSingleTelemetry.alarms.commFault = true;
           this.lastSingleTelemetry.isStale = true;
           this.emitSingleTelemetry(this.lastSingleTelemetry);
-          this.notifyStatus(false, 'Communication timeout / hardware error (Single PS)');
+          const disconnectReason = `Hardware timeout: No response on ${this.settings.port} (Single PS, Slave ID: ${this.settings.slaveId}). Error: ${errDetail}`;
+          this.log('error', 'MODBUS', `CRITICAL: 3 consecutive poll failures. Marking DISCONNECTED. Diagnostics: 1) Verify Baud Rate matches hardware, 2) Verify Slave ID (current: ${this.settings.slaveId}), 3) Check RS485 A/B lines.`);
+          this.notifyStatus(false, disconnectReason);
         }
       } finally {
         this.isPollInFlight = false;
@@ -623,13 +718,37 @@ export class ModbusRtuService {
     });
   }
 
-  private async writeFloat32(pduAddress: number, value: number) {
+
+  /**
+   * Decodes a 32-bit IEEE 754 float from CDAB (Word-Swapped Big-Endian / Mid-Little-Endian) buffer.
+   * Modbus holding registers: Reg N (low word) = [C, D], Reg N+1 (high word) = [A, B].
+   * Wire buffer order: [C, D, A, B] -> reordered to Big-Endian [A, B, C, D].
+   */
+  private readFloat32CDAB(buf: Buffer, offset: number): number {
+    if (!buf || buf.length < offset + 4) {
+      return NaN;
+    }
+    const swapped = Buffer.from([
+      buf[offset + 2],
+      buf[offset + 3],
+      buf[offset],
+      buf[offset + 1],
+    ]);
+    return swapped.readFloatBE(0);
+  }
+
+  /**
+   * Encodes a 32-bit IEEE 754 float in CDAB (Word-Swapped Big-Endian / Mid-Little-Endian) format
+   * and writes 2 adjacent Modbus registers via writeRegisters().
+   * Register N (pduAddress) receives low word [C, D].
+   * Register N+1 (pduAddress + 1) receives high word [A, B].
+   */
+  private async writeFloat32CDAB(pduAddress: number, value: number): Promise<void> {
     const buf = Buffer.alloc(4);
-    buf.writeFloatLE(value, 0);
-    // Write 2 adjacent 16-bit registers (Little-Endian float representation)
-    const word1 = buf.readUInt16BE(0);
-    const word2 = buf.readUInt16BE(2);
-    await this.client.writeRegisters(pduAddress, [word1, word2]);
+    buf.writeFloatBE(value, 0); // [A, B, C, D]
+    const highWord = buf.readUInt16BE(0); // [A, B]
+    const lowWord = buf.readUInt16BE(2);  // [C, D]
+    await this.client.writeRegisters(pduAddress, [lowWord, highWord]);
   }
 
   private emitTelemetry(telemetry: DualPSTelemetry) {
@@ -651,10 +770,150 @@ export class ModbusRtuService {
     if (win && !win.isDestroyed()) {
       win.webContents.send('modbus:statusChange', {
         connected,
-        port: this.settings.port,
+        port: this.settings.isSimulator ? 'SIMULATOR' : this.settings.port,
+        isSimulator: Boolean(this.settings.isSimulator),
         error,
       });
     }
+  }
+
+  private simulateTelemetry() {
+    const slew = (curr: number, target: number, rate: number) => {
+      if (Math.abs(curr - target) < rate) return target;
+      return curr < target ? curr + rate : curr - rate;
+    };
+    const noise = () => (Math.random() - 0.5) * 0.008;
+
+    if (this.appMode === 'SINGLE_PS') {
+      const targetV = this.isOutputEnabled ? this.lastSingleTelemetry.vSet : 0;
+      const targetI = this.isOutputEnabled ? this.lastSingleTelemetry.iSet : 0;
+      this.simulatedState.singleV = slew(this.simulatedState.singleV, targetV, 1.5);
+      this.simulatedState.singleI = slew(this.simulatedState.singleI, targetI, 0.25);
+
+      const vMon = Math.max(0, Number((this.simulatedState.singleV + (this.isOutputEnabled ? noise() : 0)).toFixed(3)));
+      const iMon = Math.max(0, Number((this.simulatedState.singleI + (this.isOutputEnabled ? noise() : 0)).toFixed(4)));
+
+      this.lastSingleTelemetry = {
+        timestamp: Date.now(),
+        outputState: this.isOutputEnabled ? 'ON' : 'OFF',
+        vMon,
+        iMon,
+        vSet: this.lastSingleTelemetry.vSet,
+        iSet: this.lastSingleTelemetry.iSet,
+        powerActual: Number((vMon * iMon).toFixed(2)),
+        alarms: { commFault: false, emergencyStop: false },
+        isStale: false,
+        maxVoltage: 60.0,
+        maxCurrent: 10.0,
+      };
+      this.emitSingleTelemetry(this.lastSingleTelemetry);
+    } else {
+      const targetV1 = this.isOutputEnabled ? this.lastTelemetry.ch1.voltageSetpoint : 0;
+      const targetI1 = this.isOutputEnabled ? this.lastTelemetry.ch1.currentSetpoint : 0;
+      const targetV2 = this.isOutputEnabled ? this.lastTelemetry.ch2.voltageSetpoint : 0;
+      const targetI2 = this.isOutputEnabled ? this.lastTelemetry.ch2.currentSetpoint : 0;
+
+      this.simulatedState.ch1V = slew(this.simulatedState.ch1V, targetV1, 1.5);
+      this.simulatedState.ch1I = slew(this.simulatedState.ch1I, targetI1, 0.25);
+      this.simulatedState.ch2V = slew(this.simulatedState.ch2V, targetV2, 1.5);
+      this.simulatedState.ch2I = slew(this.simulatedState.ch2I, targetI2, 0.25);
+
+      const v1 = Math.max(0, Number((this.simulatedState.ch1V + (this.isOutputEnabled ? noise() : 0)).toFixed(3)));
+      const i1 = Math.max(0, Number((this.simulatedState.ch1I + (this.isOutputEnabled ? noise() : 0)).toFixed(4)));
+      const v2 = Math.max(0, Number((this.simulatedState.ch2V + (this.isOutputEnabled ? noise() : 0)).toFixed(3)));
+      const i2 = Math.max(0, Number((this.simulatedState.ch2I + (this.isOutputEnabled ? noise() : 0)).toFixed(4)));
+
+      let totalV = v1;
+      let totalI = i1;
+      if (this.activeMode === 'SERIES') {
+        totalV = Number((v1 + v2).toFixed(3));
+        totalI = i1;
+      } else if (this.activeMode === 'PARALLEL') {
+        totalV = v1;
+        totalI = Number((i1 + i2).toFixed(4));
+      }
+
+      this.lastTelemetry = {
+        ...this.lastTelemetry,
+        timestamp: Date.now(),
+        mode: this.activeMode,
+        outputState: this.isOutputEnabled ? 'ON' : 'OFF',
+        totalVoltage: totalV,
+        totalCurrent: totalI,
+        ch1: {
+          voltageActual: v1,
+          currentActual: i1,
+          voltageSetpoint: this.lastTelemetry.ch1.voltageSetpoint,
+          currentSetpoint: this.lastTelemetry.ch1.currentSetpoint,
+          powerActual: Number((v1 * i1).toFixed(2)),
+          outputEnabled: this.isOutputEnabled,
+        },
+        ch2: {
+          voltageActual: v2,
+          currentActual: i2,
+          voltageSetpoint: this.lastTelemetry.ch2.voltageSetpoint,
+          currentSetpoint: this.lastTelemetry.ch2.currentSetpoint,
+          powerActual: Number((v2 * i2).toFixed(2)),
+          outputEnabled: this.isOutputEnabled,
+        },
+        alarms: {
+          ch1OverVoltage: false,
+          ch1OverCurrent: false,
+          ch2OverVoltage: false,
+          ch2OverCurrent: false,
+          commFault: false,
+          emergencyStop: false,
+        },
+        isStale: false,
+      };
+      this.emitTelemetry(this.lastTelemetry);
+    }
+  }
+
+  private log(
+    level: 'info' | 'warn' | 'error' | 'success',
+    source: 'SERIAL' | 'MODBUS' | 'SEQUENCE' | 'SIMULATOR' | 'SYSTEM',
+    message: string,
+    details?: any
+  ) {
+    const entry: SystemLogEntry = {
+      id: `${Date.now()}-${Math.random().toString(36).substring(2, 7)}`,
+      timestamp: Date.now(),
+      level,
+      source,
+      message,
+      details,
+    };
+
+    this.logs.push(entry);
+    if (this.logs.length > 500) {
+      this.logs.shift();
+    }
+
+    const timeStr = new Date(entry.timestamp).toLocaleTimeString();
+    const prefix = `[${timeStr}] [${source}] [${level.toUpperCase()}]`;
+
+    if (level === 'error') {
+      console.error(`${prefix} ${message}`, details !== undefined ? details : '');
+    } else if (level === 'warn') {
+      console.warn(`${prefix} ${message}`, details !== undefined ? details : '');
+    } else {
+      console.log(`${prefix} ${message}`, details !== undefined ? details : '');
+    }
+
+    const win = this.windowGetter();
+    if (win && !win.isDestroyed()) {
+      win.webContents.send('system:log', entry);
+    }
+  }
+
+  public getRecentLogs(): SystemLogEntry[] {
+    return [...this.logs];
+  }
+
+  public clearLogs(): boolean {
+    this.logs = [];
+    return true;
   }
 
   public getOutputState(): boolean {
@@ -664,6 +923,13 @@ export class ModbusRtuService {
   public async writeHardwareMode(mode: OperatingMode): Promise<{ success: boolean; readbackMode?: OperatingMode; error?: string }> {
     if (!this.isConnected) {
       return { success: false, error: 'Hardware is not connected' };
+    }
+
+    if (this.settings.isSimulator) {
+      this.activeMode = mode;
+      this.lastTelemetry.mode = mode;
+      this.log('info', 'SIMULATOR', `Hardware Mode updated in simulator: ${mode}`);
+      return { success: true, readbackMode: mode };
     }
 
     const currentSession = this.sessionId;
@@ -725,6 +991,17 @@ export class ModbusRtuService {
   }
 
   public async writeOutputStateConfirmed(enabled: boolean): Promise<{ success: boolean; confirmedState?: boolean; error?: string }> {
+    if (this.settings.isSimulator) {
+      this.isOutputEnabled = enabled;
+      this.lastTelemetry.outputState = enabled ? 'ON' : 'OFF';
+      this.lastTelemetry.ch1.outputEnabled = enabled;
+      this.lastTelemetry.ch2.outputEnabled = enabled;
+      this.lastSingleTelemetry.outputState = enabled ? 'ON' : 'OFF';
+      this.emitTelemetry(this.lastTelemetry);
+      this.emitSingleTelemetry(this.lastSingleTelemetry);
+      return { success: true, confirmedState: enabled };
+    }
+
     if (!this.isConnected) {
       return { success: false, error: 'Hardware is not connected' };
     }
@@ -738,27 +1015,37 @@ export class ModbusRtuService {
         }
 
         try {
-          console.log(`[Sequence Startup] Output ${enabled ? 'ON' : 'OFF'} command`);
+          console.log(`[Sequence Engine] Output ${enabled ? 'ON' : 'OFF'} command (Coil 0 START_STOP)`);
 
           // Coil START_STOP: Address 0X 1 (PDU Wire Address 0)
           await this.client.writeCoil(0, enabled);
 
           // Small delay before readback
-          await new Promise((r) => setTimeout(r, 30));
+          await new Promise((r) => setTimeout(r, 50));
 
-          // Read back Coil 0
-          const coilRes = await this.client.readCoils(0, 1);
+          // Read back Coil 0 (safely wrapped in case hardware doesn't support reading coil)
           let confirmedState = enabled;
-          if (coilRes && coilRes.data && coilRes.data.length > 0) {
-            confirmedState = Boolean(coilRes.data[0]);
+          try {
+            const coilRes = await this.client.readCoils(0, 1);
+            if (coilRes && coilRes.data && coilRes.data.length > 0) {
+              confirmedState = Boolean(coilRes.data[0]);
+            }
+          } catch (rbErr: any) {
+            console.warn('[Sequence Engine] Readback coil warning (hardware may only support write):', rbErr?.message);
+            confirmedState = enabled;
           }
 
-          console.log(`[Sequence Startup] Output Readback: ${confirmedState ? 'ON' : 'OFF'}`);
+          console.log(`[Sequence Engine] Output Readback: ${confirmedState ? 'ON' : 'OFF'}`);
           const isVerified = confirmedState === enabled;
-          console.log(`[Sequence Startup] Output Verification: ${isVerified ? 'PASS' : 'FAIL'}`);
+          console.log(`[Sequence Engine] Output Verification: ${isVerified ? 'PASS' : 'FAIL'}`);
 
           this.isOutputEnabled = confirmedState;
           this.lastTelemetry.outputState = confirmedState ? 'ON' : 'OFF';
+          this.lastTelemetry.ch1.outputEnabled = confirmedState;
+          this.lastTelemetry.ch2.outputEnabled = confirmedState;
+          this.lastSingleTelemetry.outputState = confirmedState ? 'ON' : 'OFF';
+          this.emitTelemetry(this.lastTelemetry);
+          this.emitSingleTelemetry(this.lastSingleTelemetry);
 
           if (!isVerified) {
             return {
@@ -770,7 +1057,7 @@ export class ModbusRtuService {
 
           return { success: true, confirmedState };
         } catch (err: any) {
-          console.error('[Sequence Startup] Output write error:', err);
+          console.error('[Sequence Engine] Output write error:', err);
           return { success: false, error: err?.message || 'Failed to write output state' };
         }
       });
@@ -994,7 +1281,7 @@ export class ModbusRtuService {
 
     // Precise Step Deadline Timer using setTimeout
     if (this.sequenceStepDeadlineTimer) clearTimeout(this.sequenceStepDeadlineTimer);
-    this.sequenceStepDeadlineTimer = setTimeout(() => {
+    this.sequenceStepDeadlineTimer = setTimeout(async () => {
       if (this.sequenceUiTimer) clearInterval(this.sequenceUiTimer);
       this.sequenceUiTimer = null;
 
@@ -1017,6 +1304,13 @@ export class ModbusRtuService {
         console.log(`================================================================================`);
         console.log(`[Sequence Engine] SEQUENCE COMPLETED ALL ${this.sequenceTotalCycles} CYCLES at ${new Date().toISOString()}`);
         console.log(`================================================================================`);
+        // Safely write Output OFF to hardware Coil 0 (START_STOP = false)
+        try {
+          await this.writeOutputStateConfirmed(false);
+          console.log(`[Sequence Engine] Output safely turned OFF on sequence completion.`);
+        } catch (err: any) {
+          console.error(`[Sequence Engine] Error writing Output OFF on sequence completion:`, err);
+        }
         this.emitSequenceProgress();
       } else {
         // Execute Next Step

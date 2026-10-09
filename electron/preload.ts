@@ -7,6 +7,10 @@ contextBridge.exposeInMainWorld('electronAPI', {
   connectSerial: (settings: SerialSettings) => ipcRenderer.invoke('modbus:connect', settings),
   disconnectSerial: () => ipcRenderer.invoke('modbus:disconnect'),
 
+  // System & Modbus Logs
+  getRecentLogs: () => ipcRenderer.invoke('system:getLogs'),
+  clearLogs: () => ipcRenderer.invoke('system:clearLogs'),
+
   // Power Supply Commands & Application Mode
   setAppMode: (mode: any) => ipcRenderer.invoke('modbus:setAppMode', mode),
   setMode: (mode: OperatingMode) => ipcRenderer.invoke('modbus:setMode', mode),
@@ -59,6 +63,13 @@ contextBridge.exposeInMainWorld('electronAPI', {
       ipcRenderer.removeListener('sequence:progress', subscription);
     };
   },
+  onSystemLog: (callback: (log: any) => void) => {
+    const subscription = (_event: any, data: any) => callback(data);
+    ipcRenderer.on('system:log', subscription);
+    return () => {
+      ipcRenderer.removeListener('system:log', subscription);
+    };
+  },
 
   // Database API
   db: {
@@ -68,5 +79,21 @@ contextBridge.exposeInMainWorld('electronAPI', {
     getRecipes: () => ipcRenderer.invoke('db:getRecipes'),
     saveRecipe: (recipe: Omit<SequenceRecipe, 'id'>) => ipcRenderer.invoke('db:saveRecipe', recipe),
     deleteRecipe: (recipeId: string) => ipcRenderer.invoke('db:deleteRecipe', recipeId),
+  },
+
+  // Reports API
+  reports: {
+    savePdf: (params: { fileName: string; dataBase64: string; metadata: any }) =>
+      ipcRenderer.invoke('reports:savePdf', params),
+    getReports: () => ipcRenderer.invoke('reports:getReports'),
+    openPdf: (filePath: string) => ipcRenderer.invoke('reports:openPdf', filePath),
+    showInFolder: (filePath: string) => ipcRenderer.invoke('reports:showInFolder', filePath),
+    deleteReport: (id: string) => ipcRenderer.invoke('reports:deleteReport', id),
+  },
+
+  // Persistent Settings
+  settings: {
+    get: (key: string) => ipcRenderer.invoke('settings:get', key),
+    set: (key: string, value: string) => ipcRenderer.invoke('settings:set', key, value),
   },
 });

@@ -1,4 +1,4 @@
-import { app, BrowserWindow, ipcMain, dialog } from 'electron';
+import { app, BrowserWindow, ipcMain, dialog, shell } from 'electron';
 import path from 'path';
 import fs from 'fs';
 import { ModbusRtuService } from './modbusRtuService';
@@ -50,6 +50,7 @@ function createWindow() {
     }
   }
 
+
   // Safety Interlock: Window Close Prevention if Output is Active
   mainWindow.on('close', async (e) => {
     if (modbusService && modbusService.getOutputState()) {
@@ -87,15 +88,29 @@ function registerIpcHandlers() {
   });
 
   ipcMain.handle('modbus:connect', async (_event, settings) => {
-    return await modbusService!.connect(settings);
+    console.log(`[IPC Main] modbus:connect received:`, JSON.stringify(settings));
+    const result = await modbusService!.connect(settings);
+    console.log(`[IPC Main] modbus:connect result:`, JSON.stringify(result));
+    return result;
   });
 
   ipcMain.handle('modbus:disconnect', async () => {
+    console.log(`[IPC Main] modbus:disconnect received`);
     return await modbusService!.disconnect();
+  });
+
+  // System & Diagnostics Logs Handlers
+  ipcMain.handle('system:getLogs', async () => {
+    return modbusService!.getRecentLogs();
+  });
+
+  ipcMain.handle('system:clearLogs', async () => {
+    return modbusService!.clearLogs();
   });
 
   // Power Supply Hardware Control Handlers
   ipcMain.handle('modbus:setAppMode', async (_event, mode) => {
+    console.log(`[IPC Main] modbus:setAppMode received: ${mode}`);
     return await modbusService!.setAppMode(mode);
   });
 
@@ -160,6 +175,98 @@ function registerIpcHandlers() {
 
   ipcMain.handle('sequence:getProgress', async () => {
     return modbusService!.getSequenceProgress();
+  });
+
+  // Reports & PDF Handling
+  ipcMain.handle('reports:savePdf', async (_event, { fileName, dataBase64, metadata }) => {
+    try {
+      let reportsDir = path.join(app.getPath('documents'), 'JOMA_Reports');
+      if (!fs.existsSync(reportsDir)) {
+        try {
+          fs.mkdirSync(reportsDir, { recursive: true });
+        } catch (_) {
+          reportsDir = app.getPath('downloads');
+        }
+      }
+
+      const filePath = path.join(reportsDir, fileName);
+      const buffer = Buffer.from(dataBase64, 'base64');
+      fs.writeFileSync(filePath, buffer);
+
+      const record = {
+        id: metadata?.id || 'rep_' + Date.now(),
+        fileName,
+        filePath,
+        timestamp: metadata?.timestamp || Date.now(),
+        mode: metadata?.mode || 'ISOLATED',
+        totalSamples: metadata?.totalSamples || 0,
+        durationSeconds: metadata?.durationSeconds || 0,
+        loggingIntervalMs: metadata?.loggingIntervalMs || 1000,
+        vMax: metadata?.vMax || 60,
+        iMax: metadata?.iMax || 10,
+      };
+
+      dbService!.saveReport(record);
+      return { success: true, filePath, record };
+    } catch (err: any) {
+      console.error('Failed to save PDF report:', err);
+      return { success: false, error: err?.message || 'Failed to save PDF report' };
+    }
+  });
+
+  ipcMain.handle('reports:getReports', async () => {
+    return dbService!.getReports();
+  });
+
+  ipcMain.handle('reports:openPdf', async (_event, filePath) => {
+    try {
+      if (fs.existsSync(filePath)) {
+        await shell.openPath(filePath);
+        return { success: true };
+      }
+      return { success: false, error: 'File does not exist: ' + filePath };
+    } catch (err: any) {
+      return { success: false, error: err?.message };
+    }
+  });
+
+  ipcMain.handle('reports:showInFolder', async (_event, filePath) => {
+    try {
+      if (fs.existsSync(filePath)) {
+        shell.showItemInFolder(filePath);
+        return { success: true };
+      }
+      const dir = path.dirname(filePath);
+      if (fs.existsSync(dir)) {
+        shell.openPath(dir);
+        return { success: true };
+      }
+      return { success: false, error: 'Path not found' };
+    } catch (err: any) {
+      return { success: false, error: err?.message };
+    }
+  });
+
+  ipcMain.handle('reports:deleteReport', async (_event, id) => {
+    try {
+      const reports = dbService!.getReports();
+      const target = reports.find((r) => r.id === id);
+      if (target && fs.existsSync(target.filePath)) {
+        try { fs.unlinkSync(target.filePath); } catch (_) {}
+      }
+      return dbService!.deleteReport(id);
+    } catch (err: any) {
+      return false;
+    }
+  });
+
+  ipcMain.handle('settings:get', async (_event, key) => {
+    return dbService!.getSetting(key);
+  });
+
+  ipcMain.handle('settings:set', async (_event, key, val) => {
+    dbService!.setSetting(key, val);
+    return true;
   });
 }
 

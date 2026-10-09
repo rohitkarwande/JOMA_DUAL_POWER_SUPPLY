@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import { Send, AlertTriangle } from 'lucide-react';
+import { formatVoltage, formatCurrent } from '../utils/formatters';
 
 interface ChannelCardProps {
   channelNumber: 1 | 2;
@@ -114,7 +115,7 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
             <span className="text-[10px] font-mono text-slate-400">Reg {channelNumber === 1 ? '4X 1' : '4X 5'}</span>
           </div>
           <div className={`${digitalClass} rounded-lg p-2.5 text-2xl font-bold flex justify-between items-center mt-0.5 border border-slate-800`}>
-            <span>{voltageActual.toFixed(3)}</span>
+            <span>{formatVoltage(voltageActual)}</span>
             <span className="text-slate-400 text-base font-sans">V</span>
           </div>
         </div>
@@ -126,7 +127,7 @@ export const ChannelCard: React.FC<ChannelCardProps> = ({
             <span className="text-[10px] font-mono text-slate-400">Reg {channelNumber === 1 ? '4X 3' : '4X 7'}</span>
           </div>
           <div className={`${digitalClass} rounded-lg p-2.5 text-2xl font-bold flex justify-between items-center mt-0.5 border border-slate-800`}>
-            <span>{currentActual.toFixed(4)}</span>
+            <span>{formatCurrent(currentActual)}</span>
             <span className="text-slate-400 text-base font-sans">A</span>
           </div>
         </div>

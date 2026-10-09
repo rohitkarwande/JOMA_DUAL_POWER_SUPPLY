@@ -17,10 +17,24 @@ interface TelemetryLogEntry {
   output_state: string;
 }
 
+export interface ReportRecord {
+  id: string;
+  fileName: string;
+  filePath: string;
+  timestamp: number;
+  mode: string;
+  totalSamples: number;
+  durationSeconds: number;
+  loggingIntervalMs: number;
+  vMax: number;
+  iMax: number;
+}
+
 interface DatabaseSchema {
   sessions: TestSessionRecord[];
   telemetryLogs: TelemetryLogEntry[];
   recipes: SequenceRecipe[];
+  reports: ReportRecord[];
   settings: Record<string, string>;
   telemetryCounter: number;
 }
@@ -48,6 +62,7 @@ export class DatabaseService {
           sessions: parsed.sessions || [],
           telemetryLogs: parsed.telemetryLogs || [],
           recipes: parsed.recipes || [],
+          reports: parsed.reports || [],
           settings: parsed.settings || {},
           telemetryCounter: parsed.telemetryCounter || 1,
         };
@@ -59,6 +74,7 @@ export class DatabaseService {
       sessions: [],
       telemetryLogs: [],
       recipes: [],
+      reports: [],
       settings: {},
       telemetryCounter: 1,
     };
@@ -179,5 +195,35 @@ export class DatabaseService {
     this.data.recipes = this.data.recipes.filter((r) => r.id !== recipeId);
     this.saveSync();
     return true;
+  }
+
+  public saveReport(report: ReportRecord): void {
+    const existingIdx = this.data.reports.findIndex((r) => r.id === report.id);
+    if (existingIdx >= 0) {
+      this.data.reports[existingIdx] = report;
+    } else {
+      this.data.reports.unshift(report);
+    }
+    this.saveSync();
+  }
+
+  public getReports(): ReportRecord[] {
+    return [...(this.data.reports || [])].sort((a, b) => b.timestamp - a.timestamp);
+  }
+
+  public deleteReport(reportId: string): boolean {
+    this.data.reports = (this.data.reports || []).filter((r) => r.id !== reportId);
+    this.saveSync();
+    return true;
+  }
+
+  public getSetting(key: string, defaultValue?: string): string | undefined {
+    return this.data.settings?.[key] ?? defaultValue;
+  }
+
+  public setSetting(key: string, value: string): void {
+    if (!this.data.settings) this.data.settings = {};
+    this.data.settings[key] = value;
+    this.saveSync();
   }
 }

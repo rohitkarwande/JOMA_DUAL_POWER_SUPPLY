@@ -1,6 +1,7 @@
 import React, { useState, useEffect } from 'react';
 import { Zap, Send, AlertTriangle } from 'lucide-react';
 import { DualPSTelemetry } from '../types/powerSupply';
+import { formatVoltage, formatCurrent } from '../utils/formatters';
 
 interface SeriesViewProps {
   telemetry: DualPSTelemetry;
@@ -122,7 +123,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
               </label>
             </div>
             <div className="digital-display-total rounded-lg p-2.5 text-2xl font-bold flex justify-between items-center mt-0.5 border border-cyan-900 shadow-inner">
-              <span>{telemetry.totalVoltage.toFixed(3)}</span>
+              <span>{formatVoltage(telemetry.totalVoltage)}</span>
               <span className="text-cyan-400 text-base font-sans">V</span>
             </div>
           </div>
@@ -135,7 +136,7 @@ export const SeriesView: React.FC<SeriesViewProps> = ({
               </label>
             </div>
             <div className="digital-display-total rounded-lg p-2.5 text-2xl font-bold flex justify-between items-center mt-0.5 border border-cyan-900 shadow-inner">
-              <span>{telemetry.totalCurrent.toFixed(4)}</span>
+              <span>{formatCurrent(telemetry.totalCurrent)}</span>
               <span className="text-cyan-400 text-base font-sans">A</span>
             </div>
           </div>

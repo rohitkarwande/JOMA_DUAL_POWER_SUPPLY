@@ -62,6 +62,16 @@ export interface SerialSettings {
   slaveId: number;
   pollingIntervalMs: number;
   autoReconnect: boolean;
+  isSimulator?: boolean;
+}
+
+export interface SystemLogEntry {
+  id: string;
+  timestamp: number;
+  level: 'info' | 'warn' | 'error' | 'success';
+  source: 'SERIAL' | 'MODBUS' | 'SEQUENCE' | 'SIMULATOR' | 'SYSTEM';
+  message: string;
+  details?: any;
 }
 
 export interface SequenceStep {
