@@ -19,22 +19,32 @@ export interface SequenceProgress {
 
 // Single-Threaded Mutex Queue for RS485 Half-Duplex Traffic
 class SerialBusLock {
-  private queue: Array<() => Promise<any>> = [];
+  private queue: Array<{
+    task: () => Promise<any>;
+    reject: (err: any) => void;
+  }> = [];
   private isProcessing = false;
 
-  public clearQueue() {
+  public clearQueue(reason = 'OPERATION_CANCELLED_MODE_CHANGED') {
+    const oldQueue = this.queue;
     this.queue = [];
+    for (const item of oldQueue) {
+      item.reject(new Error(`[SerialBusLock] Operation cancelled: ${reason}`));
+    }
   }
 
   public async runExclusive<T>(fn: () => Promise<T>): Promise<T> {
     return new Promise<T>((resolve, reject) => {
-      this.queue.push(async () => {
-        try {
-          const result = await fn();
-          resolve(result);
-        } catch (err) {
-          reject(err);
-        }
+      this.queue.push({
+        task: async () => {
+          try {
+            const result = await fn();
+            resolve(result);
+          } catch (err) {
+            reject(err);
+          }
+        },
+        reject,
       });
       this.processQueue();
     });
@@ -44,10 +54,10 @@ class SerialBusLock {
     if (this.isProcessing || this.queue.length === 0) return;
     this.isProcessing = true;
     while (this.queue.length > 0) {
-      const task = this.queue.shift();
-      if (task) {
+      const item = this.queue.shift();
+      if (item) {
         try {
-          await task();
+          await item.task();
         } catch (_) {}
         // Inter-frame delay between Modbus packets
         await new Promise((res) => setTimeout(res, 20));
@@ -115,7 +125,7 @@ export class ModbusRtuService {
     },
   };
 
-  // Cached Single PS Telemetry State
+  // Cached Single PS Telemetry State (Limits defaulted to 60V / 10A pending user hardware specification)
   private lastSingleTelemetry: SinglePSTelemetry = {
     timestamp: Date.now(),
     outputState: 'OFF',
@@ -154,9 +164,9 @@ export class ModbusRtuService {
         await this.disconnect();
       }
 
-      // Invalidate old session ID & clear queued tasks from previous session
+      // Invalidate old session ID & clear queued tasks from previous session with promise rejection
       this.sessionId++;
-      this.busLock.clearQueue();
+      this.busLock.clearQueue('OPERATION_CANCELLED_SERIAL_RECONNECTED');
       this.isPollInFlight = false;
 
       await this.client.connectRTUBuffered(this.settings.port, {
@@ -187,7 +197,7 @@ export class ModbusRtuService {
     this.stopPolling();
     this.stopSequence();
     this.sessionId++;
-    this.busLock.clearQueue();
+    this.busLock.clearQueue('OPERATION_CANCELLED_SERIAL_DISCONNECTED');
     this.isPollInFlight = false;
     this.isConnected = false;
     try {
@@ -208,7 +218,7 @@ export class ModbusRtuService {
     }
     this.stopSequence();
     this.sessionId++;
-    this.busLock.clearQueue();
+    this.busLock.clearQueue('OPERATION_CANCELLED_MODE_CHANGED');
     this.isPollInFlight = false;
     this.appMode = mode;
     console.log(`[App Mode Switch] Active Application Mode changed to: ${mode}`);
@@ -265,15 +275,18 @@ export class ModbusRtuService {
     const vMax = this.lastTelemetry.maxVoltage || 60.0;
     const iMax = this.lastTelemetry.maxCurrent || 10.0;
 
+    const isInvalid = (val?: number, max?: number) =>
+      val !== undefined && (isNaN(val) || !isFinite(val) || val < 0 || (max !== undefined && val > max));
+
     if (
-      (params.ch1Vset !== undefined && params.ch1Vset > vMax) ||
-      (params.ch2Vset !== undefined && params.ch2Vset > vMax) ||
-      (params.masterVset !== undefined && params.masterVset > vMax) ||
-      (params.ch1Iset !== undefined && params.ch1Iset > iMax) ||
-      (params.ch2Iset !== undefined && params.ch2Iset > iMax) ||
-      (params.masterIset !== undefined && params.masterIset > iMax)
+      isInvalid(params.ch1Vset, vMax) ||
+      isInvalid(params.ch2Vset, vMax) ||
+      isInvalid(params.masterVset, vMax) ||
+      isInvalid(params.ch1Iset, iMax) ||
+      isInvalid(params.ch2Iset, iMax) ||
+      isInvalid(params.masterIset, iMax)
     ) {
-      console.error(`[Safety Interlock] Setpoint write rejected: Exceeds V_max (${vMax}V) or I_max (${iMax}A)`);
+      console.error(`[Safety Interlock] Setpoint write rejected: Invalid numerical value or exceeds V_max (${vMax}V) / I_max (${iMax}A)`);
       return false;
     }
 
@@ -329,11 +342,11 @@ export class ModbusRtuService {
     const vMax = this.lastSingleTelemetry.maxVoltage || 60.0;
     const iMax = this.lastSingleTelemetry.maxCurrent || 10.0;
 
-    if (
-      (params.vSet !== undefined && params.vSet > vMax) ||
-      (params.iSet !== undefined && params.iSet > iMax)
-    ) {
-      console.error(`[Safety Interlock] Single PS Setpoint write rejected: Exceeds V_max (${vMax}V) or I_max (${iMax}A)`);
+    const isInvalid = (val?: number, max?: number) =>
+      val !== undefined && (isNaN(val) || !isFinite(val) || val < 0 || (max !== undefined && val > max));
+
+    if (isInvalid(params.vSet, vMax) || isInvalid(params.iSet, iMax)) {
+      console.error(`[Safety Interlock] Single PS Setpoint write rejected: Invalid numerical value or exceeds V_max (${vMax}V) / I_max (${iMax}A)`);
       return false;
     }
 
